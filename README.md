@@ -6,9 +6,19 @@ A [pi](https://github.com/earendil-works/pi) extension that runs a prompt **repe
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/kolt-mcb/pi-loop/blob/main/LICENSE)
 [![pi-package](https://img.shields.io/badge/pi-package-orange.svg)](https://pi.dev/packages)
-[![Version](https://img.shields.io/badge/version-%40v0.4.0-blue.svg)](https://github.com/kolt-mcb/pi-loop/releases/tag/v0.4.0)
+[![Version](https://img.shields.io/badge/version-%40v0.4.1-blue.svg)](https://github.com/kolt-mcb/pi-loop/releases/tag/v0.4.1)
 
 Schedule a prompt to run repeatedly inside pi — on a fixed timer, when a pi event fires, or **self-paced**, where the model itself continues the loop each turn and ends it by stopping.
+
+## What changed in 0.4.1
+
+Three ways a self-paced loop could die or stall, all found by driving real sessions against a local 35B model:
+
+- **Unrelated turns ended loops.** Omit-to-end was applied on *every* turn end, to every self-paced loop — so a loop waiting on a delayed wakeup, a second self-paced loop, or one sharing a session with a cron loop was silently deleted mid-wait. It now applies only to a loop whose iteration ran in the turn that just finished.
+- **The wakeup spin.** A model that calls `schedule_loop_wakeup` without ending its turn calls it again — 297 times in one turn, measured, each with its own notification. The turn never ends, so the iteration never arms and every other loop starves. A repeat call in the same turn now answers with a plain instruction to end the turn.
+- **Postponed forever.** Scheduling a loop that was already waiting re-armed its timer. Since the tool defaults to the last self-paced loop, a call from an unrelated turn pushed the iteration out indefinitely — live, a 60s loop fired once in four and a half minutes. Such calls are now refused.
+
+The fire hint also told the model it "will not stop unless specificly indicated to", one sentence after telling it to omit the call to end the loop; that's gone. On the scenario that previously livelocked, the same model now runs a steady ~47s cadence alongside a cron loop, with one call per iteration.
 
 ## What changed in 0.4
 
@@ -41,7 +51,7 @@ The path here is the point. Earlier 0.3.x versions removed the model's control e
 ```bash
 pi install npm:@koltmcbride/pi-loop
 # or
-pi install git:github.com/kolt-mcb/pi-loop@v0.4.0
+pi install git:github.com/kolt-mcb/pi-loop@v0.4.1
 ```
 
 Verify it's loaded with `pi list`.

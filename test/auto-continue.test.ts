@@ -1,17 +1,15 @@
-// Integration test for the 0.3.0 auto-continue behaviour of self-paced loops.
+// Integration test for the model-driven self-paced loop (0.4.0 omit-to-end).
 //
 // Drives the extension against a mock pi ExtensionAPI and asserts that a
-// no-interval /loop keeps firing on its own after each turn WITHOUT the model
-// ever calling schedule_loop_wakeup — and that it stops only on an explicit
-// signal (LoopDelete, interactive takeover). This is the behaviour the unit
-// parse tests can't cover, and the exact failure the user hit (loop dying when
-// the model forgot to reschedule).
+// no-interval /loop continues only while the model calls schedule_loop_wakeup,
+// and ends when it stops calling — plus the explicit endings (/loop stop,
+// LoopDelete, interactive takeover). This is the behaviour the unit parse tests
+// can't cover. Guards against unrelated turns ending a loop, and against a
+// model that spins on the wakeup tool, live in self-paced-guards.test.ts.
 //
-// Env must be set before importing loop.ts: SELF_PACED_CONTINUE_MS is read once
-// at module load, so we pin the gap to 0ms (fires on the next macrotask) and
-// keep the store in memory (no .pi/loops writes).
+// PI_LOOP is set before importing loop.ts: it's read once at module load, and
+// "off" keeps the store in memory (no .pi/loops writes).
 process.env.PI_LOOP = "off";
-process.env.PI_LOOP_CONTINUE_MS = "0";
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -174,7 +172,7 @@ test("self-paced fire prompt is the model-driven (omit-to-end) hint", async () =
 	const { sent, command, ctx } = setup();
 	await command.handler("write the next highest number", ctx);
 	assert.match(sent[0].msg, /Self-paced loop/i);
-	assert.match(sent[0].msg, /schedule_loop_wakeup at the end of your turn/i);
+	assert.match(sent[0].msg, /schedule_loop_wakeup ONCE at the end of your turn/i);
 	assert.match(sent[0].msg, /Omit the call to end the loop/i);
 });
 

@@ -62,7 +62,7 @@ const BRIDGED_EVENTS = [
 // by NOT calling it (omit-to-end). The harness does not auto-continue — this is
 // a faithful test of whether a clean, model-driven prompt holds up.
 const SELF_PACED_HINT =
-	"\n\n[Self-paced loop: do this iteration's work, then call schedule_loop_wakeup at the end of your turn to run the next iteration. Omit the call to end the loop. Once the loop starts you will not stop unless specificly indicated to.]";
+	"\n\n[Self-paced loop: do this iteration's work, then call schedule_loop_wakeup ONCE at the end of your turn and stop — the next iteration starts on its own. Omit the call to end the loop, which is how you finish once the task is done.]";
 
 function textResult(message: string): AgentToolResult<unknown> {
 	return { content: [{ type: "text", text: message }], details: undefined } as AgentToolResult<unknown>;
@@ -126,6 +126,11 @@ export default function loopExtension(pi: ExtensionAPI) {
 	// agent_end: present → arm the next iteration; absent → the model omitted the
 	// call, so the loop ends (Claude-style omit-to-end).
 	const scheduledThisTurn = new Map<string, number>();
+	// Self-paced loops whose iteration was actually delivered since the last
+	// agent_end. Only these are candidates for omit-to-end: an agent run that has
+	// nothing to do with a loop must not be read as "the model declined to
+	// continue it".
+	const firedSinceAgentEnd = new Set<string>();
 	// Cron loops whose tick landed mid-turn; they fire when the agent goes idle.
 	const dueLoops = new Set<string>();
 	let ticker: ReturnType<typeof setInterval> | undefined;
@@ -138,6 +143,7 @@ export default function loopExtension(pi: ExtensionAPI) {
 	// equals fires the agent actually received.
 	function deliverFire(entry: LoopEntry): void {
 		dueLoops.delete(entry.id);
+		if (entry.trigger.type === "self-paced") firedSinceAgentEnd.add(entry.id);
 		const updated = store.update(entry.id, { fireCount: (entry.fireCount ?? 0) + 1 }) ?? entry;
 
 		const payload: LoopFireEvent = {
@@ -221,9 +227,9 @@ export default function loopExtension(pi: ExtensionAPI) {
 		renderStatus();
 	}
 
-	// Arm (or re-arm) the timer that delivers a self-paced loop's next iteration.
-	// Shared by the model-driven schedule_loop_wakeup and the harness-driven
-	// auto-continue, so both paths cancel cleanly via selfPacedTimers on stop.
+	// Arm (or re-arm) the timer that delivers a self-paced loop's next iteration,
+	// as requested by the model's schedule_loop_wakeup call. Tracked in
+	// selfPacedTimers so a stop cancels it cleanly.
 	function armSelfPacedWakeup(id: string, delayMs: number): void {
 		const existing = selfPacedTimers.get(id);
 		if (existing) clearTimeout(existing);
@@ -248,11 +254,20 @@ export default function loopExtension(pi: ExtensionAPI) {
 	// self-paced loop continues only if the model called schedule_loop_wakeup
 	// (recorded in scheduledThisTurn); otherwise it ends. No harness auto-continue.
 	function continueOrEndSelfPaced(): void {
+		const fired = new Set(firedSinceAgentEnd);
+		firedSinceAgentEnd.clear();
+
 		for (const l of store.listActive()) {
 			if (l.trigger.type !== "self-paced") continue;
 			const delay = scheduledThisTurn.get(l.id);
 			scheduledThisTurn.delete(l.id);
 			if (delay === undefined) {
+				// Omit-to-end applies only to a loop whose iteration ran in the turn
+				// that just finished. A loop already waiting on an armed wakeup, or one
+				// that never fired this turn (a second self-paced loop, a cron loop's
+				// turn, another extension's continuation), keeps running — otherwise
+				// any unrelated agent run silently deletes it.
+				if (selfPacedTimers.has(l.id) || !fired.has(l.id)) continue;
 				stopLoop(l.id, "loop ended — no schedule_loop_wakeup call");
 				continue;
 			}
@@ -441,7 +456,7 @@ Prefer LoopCreate over raw Bash sleep/while loops: it survives across turns and 
 					: wakeup
 						? ` · wakeup in ${formatRemaining(wakeup - Date.now())}`
 						: l.trigger.type === "self-paced" && l.status === "active"
-							? " · running, auto-continues"
+							? " · running"
 							: "";
 				const fires = l.fireCount ? ` · ${l.fireCount} fires` : "";
 				return `#${l.id} [${l.status}] ${l.prompt.slice(0, 60)} (${describeTrigger(l.trigger)})${when}${fires}`;
@@ -505,6 +520,34 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 			if (!entry || entry.trigger.type !== "self-paced" || entry.status !== "active") {
 				return Promise.resolve(textResult("No active self-paced loop; ignoring."));
 			}
+			// One call per turn is all it takes. A weaker model that doesn't end its
+			// turn after calling will call again, and again — measured at ~300 calls
+			// in a single turn, which never reaches agent_end, so the iteration never
+			// arms and every other loop starves waiting for the agent to go idle.
+			// Answering the repeat with a plain instruction (and no second notify)
+			// breaks that livelock. The cost is that a delay can't be revised
+			// mid-turn, which is worth it.
+			if (scheduledThisTurn.has(entry.id)) {
+				return Promise.resolve(
+					textResult(
+						`Loop #${entry.id} is already scheduled for its next iteration. Do not call this tool again — end your turn now so the iteration can run.`,
+					),
+				);
+			}
+			// A loop that is already waiting and did not run this turn has nothing to
+			// schedule. Re-arming it here would push its countdown out by the full
+			// delay — and since the tool defaults to the last self-paced loop, a model
+			// that calls it during someone else's turn (a cron fire, a user request)
+			// postpones the iteration indefinitely. Observed live: a 60s loop that
+			// fired once in four and a half minutes.
+			if (!firedSinceAgentEnd.has(entry.id) && selfPacedTimers.has(entry.id)) {
+				const at = selfPacedFireTimes.get(entry.id);
+				const when = at ? ` in ${formatRemaining(at - Date.now())}` : " shortly";
+				return Promise.resolve(
+					textResult(`Loop #${entry.id} is already waiting for its next iteration${when}; nothing to schedule.`),
+				);
+			}
+
 			const delayMs = Math.max(0, Math.round((params.delaySeconds ?? 0) * 1000));
 			// Record the intent; the next iteration is actually armed at agent_end (so
 			// a delay=0 timer can't fire mid-turn and race the omit-to-end decision).

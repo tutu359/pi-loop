@@ -1,144 +1,139 @@
-# pi-loop
+# pi-loop（中文版）
 
-A [pi](https://github.com/earendil-works/pi) extension that runs a prompt **repeatedly** — on a fixed timer, when a pi event fires, or at the agent's own pace. Modelled on Claude Code's `/loop`.
+一个 [pi](https://github.com/earendil-works/pi) 编码助手扩展，让一个提示词**反复运行**——按固定定时、按 pi 事件触发，或由 Agent 自定节奏。原型来自 Claude Code 的 `/loop`。本 fork 新增了 **forever 模式**：永不停止的循环。
 
-## Overview
+## 总览
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/kolt-mcb/pi-loop/blob/main/LICENSE)
-[![pi-package](https://img.shields.io/badge/pi-package-orange.svg)](https://pi.dev/packages)
-[![Version](https://img.shields.io/badge/version-%40v0.4.1-blue.svg)](https://github.com/kolt-mcb/pi-loop/releases/tag/v0.4.1)
+调度一个提示词在 pi 内部反复运行。三种经典触发方式：定时（cron）、事件、自定节奏（self-paced），以及本 fork 新增的第四种——**forever**：Agent 一空闲就立即开始下一轮，永不停止。
 
-Schedule a prompt to run repeatedly inside pi — on a fixed timer, when a pi event fires, or **self-paced**, where the model itself continues the loop each turn and ends it by stopping.
+## Forever 模式（本 fork 新增）
 
-## What changed in 0.4.1
+```
+/loop forever <任务描述>
+```
 
-Three ways a self-paced loop could die or stall, all found by driving real sessions against a local 35B model:
+- **永续运行**：Agent 每干完一轮，立刻自动开始下一轮，中间零等待。不设次数上限、不过期（其他模式 7 天自动作废，forever 不会）。
+- **上下文超长兜底**：检测到上下文超限（`stopReason: "length"` 或 overflow 类错误），自动注入 `/compact` 压缩后继续。pi 内置的主动压缩（达到阈值即压缩）是第一道防线，这里是兜底。
+- **其他一切错误**（服务过载、维护中、key 过期、未知错误）：不区分、不等待，**立即重试**。
+- **打字不接管**：你在它运行时插话，循环照跑。
+- **模型无权修改**：Agent 调用 `LoopDelete` 无法删除或暂停 forever 循环——只有你能用 `/loop stop` 停它。这修复了原版中"模型偷偷替换用户循环"的问题。
 
-- **Unrelated turns ended loops.** Omit-to-end was applied on *every* turn end, to every self-paced loop — so a loop waiting on a delayed wakeup, a second self-paced loop, or one sharing a session with a cron loop was silently deleted mid-wait. It now applies only to a loop whose iteration ran in the turn that just finished.
-- **The wakeup spin.** A model that calls `schedule_loop_wakeup` without ending its turn calls it again — 297 times in one turn, measured, each with its own notification. The turn never ends, so the iteration never arms and every other loop starves. A repeat call in the same turn now answers with a plain instruction to end the turn.
-- **Postponed forever.** Scheduling a loop that was already waiting re-armed its timer. Since the tool defaults to the last self-paced loop, a call from an unrelated turn pushed the iteration out indefinitely — live, a 60s loop fired once in four and a half minutes. Such calls are now refused.
+唯一停止方式：`/loop stop [id]`。
 
-The fire hint also told the model it "will not stop unless specificly indicated to", one sentence after telling it to omit the call to end the loop; that's gone. On the scenario that previously livelocked, the same model now runs a steady ~47s cadence alongside a cron loop, with one call per iteration.
+## 其他功能（继承自上游）
 
-## What changed in 0.4
+- **固定间隔循环** —— `/loop 15m <prompt>`：解析间隔为 cron，由自重装定时器驱动，续跑是默认行为。
+- **自定节奏循环** —— `/loop <prompt>`（无间隔）：模型每轮结束时调用 `schedule_loop_wakeup` 续命，不调用即结束。天然支持无限、目标导向、随机三种形态。
+- **事件与混合触发** —— 监听 pi 事件（如 `tool_execution_end`、`turn_end`）或 cron+事件组合带防抖。
+- **多循环并发** —— 同时跑多个；用 `LoopCreate` / `LoopList` / `LoopDelete` 或 `/loop list` 管理。
+- **持久化** —— 循环状态存于 `.pi/loops`，`--resume`/`--continue` 时恢复未过期的循环。
+- **安全上限** —— 每循环 `maxFires` 与 7 天自动过期（forever 模式不设这两项）；错峰触发避免 API 惊群。
+- **只读模式** —— 限制循环只使用只读工具。
+- **实时状态** —— footer 指示器和 widget 列出活跃循环及下次触发倒计时。
 
-Self-paced `/loop <prompt>` is now **model-driven**, faithfully matching Claude Code's `/loop`: the model does one iteration's work, then calls `schedule_loop_wakeup` at the end of its turn to run the next one — and ends the loop simply by **not** calling it (omit-to-end). There is no harness auto-continue.
-
-One mechanism, three natural shapes:
-
-- **Indefinite** — the model calls the wakeup every turn (e.g. *keep incrementing count.txt*).
-- **Goal-bound** — it continues until the goal is met, then omits the call (e.g. *count to 10, then stop*).
-- **Stochastic** — it continues an unpredictable number of times, stopping on a runtime condition (e.g. *roll a die until a 6*).
-
-The path here is the point. Earlier 0.3.x versions removed the model's control entirely (harness auto-continue, indefinite-only) on the assumption a weaker local model couldn't drive the loop at all. That was too pessimistic — the earlier failures were mostly a *bad prompt*. With a clean, de-jargoned version of Claude Code's wakeup prompt, a local model drives all three shapes (validated by hand and by `npm run test:e2e`). The remaining caveat is honest: model-driven continuation still relies on the model calling the wakeup **and then ending its turn**. A weaker model can call it and keep going — measured at ~300 calls in a single turn on a local 35B, which never reaches turn-end, so the iteration never arms and other loops starve waiting for the agent to go idle. A repeat call in the same turn is now answered with a plain instruction to end the turn (and no second notification), which is what breaks that spin: the same run then took one call and armed normally. If you need a loop that cannot stall at all, the cron form (`/loop 15m …`) is harness-driven and immune.
-
-### 0.2.x–0.3.x foundations
-
-0.2.0 made a parsed interval **authoritative and timer-driven** (`/loop 15m …` → cron on a self-re-arming timer), and added **event**/**hybrid** triggers, **multiple concurrent loops**, **persistence** across resume, per-session jitter, and a climbing iteration display.
-
-## Features
-
-- **Fixed-interval loops** — `/loop 15m <prompt>` parses the interval into cron and runs it on a self-re-arming timer. Continuation is the default.
-- **Model-driven self-paced loops** — `/loop <prompt>` (no interval): the model does each iteration, then calls `schedule_loop_wakeup` to run the next one, or omits it to end the loop. Naturally handles indefinite, goal-bound, and stochastic loops. You can always take over (`/loop stop`, or just type).
-- **Event & hybrid triggers** — fire on a pi event (e.g. `tool_execution_end`, `turn_end`, `monitor:done`) instead of polling, or combine cron + event with debounce.
-- **Multiple loops** — run several at once; manage with `LoopCreate` / `LoopList` / `LoopDelete` or `/loop list`.
-- **Persistence** — loops are stored under `.pi/loops` and restored, if unexpired, on `--resume`/`--continue`.
-- **Safety caps** — per-loop `maxFires` and an automatic 7-day expiry; jittered fire times avoid API stampedes.
-- **Read-only mode** — restrict a loop's fires to read/inspection tools.
-- **Live status** — a footer indicator and widget list active loops with next-fire countdowns. A self-paced loop leads with its climbing iteration count (`⟳ #2 … · next in 0s`); the loop id is shown in `/loop list`.
-
-## Installation
+## 安装
 
 ```bash
-pi install npm:@koltmcbride/pi-loop
-# or
-pi install git:github.com/kolt-mcb/pi-loop@v0.4.1
+pi install git:github.com/tutu359/pi-loop@main
+# 本地开发调试（改动即时生效）：
+pi install file:/path/to/pi-loop-fork
 ```
 
-Verify it's loaded with `pi list`.
+用 `pi list` 验证已加载。
 
-## Quick start
-
-```
-/loop 5m check if the deployment finished and report what happened
-```
-
-Fixed 5-minute loop. Runs until you stop it, 7 days pass, or it hits a fire cap.
+## 快速上手
 
 ```
-/loop check whether CI passed and address review comments
+/loop forever 续写小说下一章，写完继续下一章
 ```
 
-Self-paced: the model works an iteration, then continues by calling `schedule_loop_wakeup` — and stops on its own when the task is done (or you `/loop stop` / type to take over).
+永续循环：每轮结束立刻开始下一轮，上下文满了自动压缩，其他报错直接重试，永不停止。
 
 ```
-/loop stop          # stop all active loops
-/loop stop 3        # stop loop #3
-/loop list          # show / manage active loops
+/loop 5m 检查部署是否完成并报告结果
 ```
 
-## Usage
+固定 5 分钟循环。一直跑到你手动停止、7 天到期或触发次数上限。
 
-### `/loop` command
+```
+/loop 检查 CI 是否通过并处理 review 意见
+```
 
-| Input | Behaviour |
+自定节奏：模型干完一轮后自行决定是否通过 `schedule_loop_wakeup` 继续，任务完成时不调用即自然结束。
+
+```
+/loop stop          # 停止所有循环
+/loop stop 3        # 停止 3 号循环
+/loop list          # 查看/管理活跃循环
+```
+
+## 用法
+
+### `/loop` 命令
+
+| 输入 | 行为 |
 | --- | --- |
-| `/loop 15m <prompt>` | Fixed-interval (cron) loop. Interval may also trail: `<prompt> every 2 hours`. |
-| `/loop 0 9 * * 1-5 <prompt>` | Full 5-field cron schedule. |
-| `/loop <prompt>` | Self-paced loop — the model continues each turn via `schedule_loop_wakeup`, and ends it by omitting the call (or you `/loop stop`). |
-| `/loop list` | List/manage active loops. |
-| `/loop stop [id]` | Stop all loops, or one by id. |
+| `/loop forever <prompt>` | **永续循环**（本 fork 新增）：Agent 一空闲立即接续，永不停止。 |
+| `/loop 15m <prompt>` | 固定间隔（cron）循环。间隔也可放句尾：`<prompt> every 2 hours`。 |
+| `/loop 0 9 * * 1-5 <prompt>` | 完整 5 段 cron 表达式。 |
+| `/loop <prompt>` | 自定节奏循环——模型每轮通过 `schedule_loop_wakeup` 续跑，不调用即结束。 |
+| `/loop list` | 查看/管理活跃循环。 |
+| `/loop stop [id]` | 停止所有循环，或按 id 停一个。 |
 
-Intervals use `s` / `m` / `h` / `d`. Sub-minute rounds up to one minute (cron's floor); odd intervals like `7m` snap to the nearest clean cron step and the loop tells you what it picked.
+间隔支持 `s` / `m` / `h` / `d`。不足一分钟的向上取整到一分钟（cron 下限）；不整的间隔（如 `7m`）会吸附到最近的整步并告知你实际选了什么。
 
-### Tools (for the agent)
+### 工具（供 Agent 使用）
 
-| Tool | What it does |
+| 工具 | 作用 |
 | --- | --- |
-| `LoopCreate` | Schedule a loop on a cron timer, a pi event, or a hybrid of both. Supports `recurring`, `readOnly`, `maxFires`, `filter`. |
-| `LoopList` | List loops with ids, triggers, fire counts, next-fire times. |
-| `LoopDelete` | Delete a loop, or `action="pause"` to keep it without firing. |
-| `schedule_loop_wakeup` | Continue a self-paced `/loop`: call at the end of a turn to run the next iteration (optional `delaySeconds`; `0` = immediately). Omit it to end the loop. |
+| `LoopCreate` | 按 cron 定时、pi 事件或混合方式调度循环。支持 `recurring`、`readOnly`、`maxFires`、`filter`。**无法创建或修改 forever 循环。** |
+| `LoopList` | 列出循环的 id、触发方式、触发次数、下次触发时间。 |
+| `LoopDelete` | 按 id 删除循环，或 `action="pause"` 暂停。**对 forever 循环无权限，会被拒绝。** |
+| `schedule_loop_wakeup` | 续跑自定节奏 `/loop`：回合结束时调用以运行下一轮（可选 `delaySeconds`；`0` = 立即）。不调用即结束循环。 |
 
-Trigger types: `cron` (`5m`, `1h`, `0 9 * * 1-5`), `event` (any pi event-bus channel; lifecycle events `tool_execution_start/end`, `turn_start/end`, `agent_start/end`, `message_end` are bridged through), or `hybrid` (both, debounced).
+触发类型：`cron`（`5m`、`1h`、`0 9 * * 1-5`）、`event`（任意 pi 事件通道；生命周期事件 `tool_execution_start/end`、`turn_start/end`、`agent_start/end`、`message_end` 已桥接）、`hybrid`（两者组合带防抖）、`forever`（仅命令层可创建）。
 
-## Behaviour notes
+## 行为说明
 
-- **Cron fires wait for idle.** A tick that lands while the agent is mid-turn marks the loop **due** (shown in the status widget) instead of queueing a stale prompt; the fire is delivered fresh the moment the agent goes idle. Ticks landing while already due collapse into that one fire — so when turns run longer than the interval, the effective cadence is one fire per turn, and `fireCount` only counts fires the agent actually received.
-- **Event fires land between turns.** An event/hybrid fire is delivered as a follow-up to the turn that caused it; a recurring fire is skipped while a message is already queued, so ticks never stack.
-- **Takeover.** Typing while a self-paced loop is running ends it (you took over). Cron/event loops keep running across your messages until you `/loop stop` them.
-- **Only the loop that ran can end.** Omit-to-end applies to a self-paced loop whose iteration ran in the turn that just finished. A loop waiting on a delayed wakeup, or a second loop this turn never touched, keeps running — so a cron fire, another self-paced loop, or another extension driving a turn can't silently delete it. Continuing two self-paced loops in one turn means one `schedule_loop_wakeup` call each (the repeat-call guard is per loop id).
-- **Ending a self-paced loop.** The model ends it by *not* calling `schedule_loop_wakeup` at the end of a turn (omit-to-end) — so it can stop itself when a goal is met or a condition is hit. You can always end it immediately with `/loop stop [id]` or by typing. The continuation is recorded during the turn and the next iteration is armed at turn-end, so a `delay:0` call can't fire mid-turn and double up.
-- **No catch-up.** If fires were missed while busy, the loop fires once when idle, not once per missed interval.
-- **Session binding.** Loops arm at session start (a `--resume`d loop fires without you having to type first), and re-bind when the session changes (`/new`, fork), so a new session never inherits the old session's timers. Note each session has its own store — a loop started in one terminal isn't visible to `/loop stop` in another.
+- **Cron 触发等待空闲。** Agent 忙碌时到点的 tick 会把循环标记为 **due**（状态栏可见）而不是排队陈旧提示；Agent 一空闲立即补发。重复的 tick 合并为一次触发——当单轮时长超过间隔时，实际节奏变为每轮一次。
+- **事件触发落在回合之间。** 事件/混合触发作为 follow-up 投递给引发它的那个回合；已有排队消息时循环触发会跳过，不会堆积。
+- **接管语义。** 自定节奏循环等待期间你打字即结束（视为接管）。cron/event 循环和 **forever 循环**不受你的消息影响，直到 `/loop stop`。
+- **只有跑过的循环才能结束。** omit-to-end 只作用于本轮实际运行过的自定节奏循环；等待中的循环或其他循环不受无关回合影响。
+- **上下文超长恢复（forever）。** 检测到 overflow 后自动注入 `/compact`，压缩完成后继续下一轮。配合在 `models.json` 中把模型的 `contextWindow` 调至合理值（使 pi 的压缩触发点远离真实窗口上限），可实现无人值守通宵运行。
+- **不补发。** 忙碌期间错过的触发只在空闲时补一次，不按间隔逐个补。
+- **会话绑定。** 循环在会话开始时武装（`--resume` 恢复的循环无需输入即可触发），会话变更（`/new`、fork）时重新绑定。每个会话有独立的存储——一个终端启动的循环对另一个终端的 `/loop stop` 不可见。
 
-## Configuration
+## 配置
 
-| Variable | Effect | Default |
+| 变量 | 效果 | 默认值 |
 |---|---|---|
-| `PI_LOOP` | `off` disables persistence (in-memory only); an absolute or relative path sets a custom store file | `.pi/loops/loops-<sessionId>.json` |
+| `PI_LOOP` | `off` 关闭持久化（仅内存）；绝对/相对路径指定自定义存储文件 | `.pi/loops/loops-<sessionId>.json` |
 
-Constants at the top of `loop.ts` / `src/`: status tick interval, default hybrid debounce, and the bridged lifecycle event list. Caps: 25 active loops, 7-day expiry.
+常量位于 `loop.ts` / `src/` 顶部：状态刷新间隔、混合触发默认防抖、桥接的生命周期事件列表。上限：25 个活跃循环、7 天过期（forever 循环不适用）。
 
-## Development
+## 开发
 
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx — covers parsing, cron, jitter
+npm test            # node:test via tsx — 覆盖解析、cron、抖动
 ```
 
-Source layout:
+## 源码结构
 
-| File | Responsibility |
+| 文件 | 职责 |
 | --- | --- |
-| `src/types.ts` | Loop/trigger types. |
-| `src/loop-parse.ts` | `parseInterval`, `extractInterval`, cron math, jitter (pure, tested). |
-| `src/store.ts` | Loop registry + JSON persistence. |
-| `src/scheduler.ts` | Self-re-arming cron timers. |
-| `src/triggers.ts` | Event/hybrid subscriptions + debounce. |
-| `loop.ts` | Entry: command, tools, fire→message bridge, status widget, lifecycle. |
+| `src/types.ts` | 循环/触发类型（含 forever）。 |
+| `src/loop-parse.ts` | `parseInterval`、`extractInterval`、cron 数学、抖动（纯函数，已测试）。 |
+| `src/store.ts` | 循环注册表 + JSON 持久化。 |
+| `src/scheduler.ts` | 自重装 cron 定时器。 |
+| `src/triggers.ts` | 事件/混合订阅 + 防抖。 |
+| `loop.ts` | 入口：命令、工具、触发→消息桥、状态组件、生命周期（含 forever 的 agent_end 续跑与 overflow 兜底）。 |
 
-## License
+## 许可证
 
 [MIT](LICENSE)
+
+## 致谢
+
+基于 [kolt-mcb/pi-loop](https://github.com/kolt-mcb/pi-loop)（MIT）修改，感谢原作者的工作。

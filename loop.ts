@@ -898,16 +898,37 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 	pi.on("session_start", async (_event, ctx) => bindSession(ctx));
 	pi.on("before_agent_start", async (_event, ctx) => captureCtx(ctx));
 	pi.on("turn_start", async (_event, ctx) => captureCtx(ctx));
+	// Context-overflow recovery: whether the run that just ended hit the context
+	// limit. Detected at agent_end (where event.messages are available); acted on
+	// at agent_settled (where the session is truly idle and ctx.compact is safe).
+	let lastRunOverflow = false;
+
 	pi.on("agent_end", async (event, ctx) => {
 		captureCtx(ctx);
 		deliverDue();
 		continueOrEndSelfPaced();
-		// Forever loops: only context overflow gets special treatment — queue
-		// /compact before the next fire so the retry starts with a smaller
-		// context. Every other failure mode (overload, maintenance, auth,
-		// unknown) is met with an immediate retry.
-		if (classifyRun((event as { messages?: unknown }).messages) === "overflow") {
-			pi.sendUserMessage("/compact", { deliverAs: "followUp" });
+		// Classify the finished run for forever loops. Only context overflow gets
+			// special treatment (compact before continuing); every other failure
+			// mode — overload, maintenance, auth, unknown — just retries immediately.
+		lastRunOverflow =
+			classifyRun((event as { messages?: unknown }).messages) === "overflow";
+	});
+
+	// agent_settled = the session is truly idle (no run, no compaction, no retry,
+		// no queued continuation). agent_end fires while the session still counts
+		// as busy, so forever continuation must happen here — not at agent_end —
+		// or the busy check would skip every fire and the loop would die after one
+		// iteration.
+	pi.on("agent_settled", async (_event, ctx) => {
+		captureCtx(ctx);
+		if (lastRunOverflow) {
+			lastRunOverflow = false;
+			// Compact first (fire-and-forget), then refire — the next iteration
+			// starts on a smaller context once compaction finishes.
+			latestCtx?.compact?.({
+				onError: (error: Error) =>
+					notify(`Compaction failed: ${error.message}`, "error"),
+			});
 		}
 		continueForever();
 	});

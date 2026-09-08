@@ -20,6 +20,28 @@
 
 唯一停止方式：`/loop stop [id]`。
 
+## 循环管理面板（本 fork 新增）
+
+`/loop list`（或直接 `/loop`）打开统一管理面板，所有循环操作都在这里：
+
+```
+#2 [active] forever · 5次 · 绿写小说下一章
+#3 [paused] cron: */15 * * * * · 12次 · 检查CI是否通过
+#4 [active] cron: */30 * * * * · 0次 · 下次 23分钟后 · 检查部署
+⚠️ 全部停止
+← 关闭
+```
+
+选中某个循环后进入操作菜单：
+
+- **✏️ 编辑任务描述**：预填当前 prompt，改完回车提交，下一轮 fire 生效（不停循环、保留 id/次数）；空文本视为取消
+- **⏸️ 暂停 / ▶️ 恢复**：暂停不触发 fire，状态保留；恢复 forever 循环时若 Agent 空闲会**立即补触发一次**，cron 循环等下一节拍
+- **🛑 停止**：直接停，无确认
+
+命令层保留：`/loop stop <id>`（直停）、`/loop stop all`（全停）。`/loop stop` 不带参数**不停止任何东西**，只提示用法——防误伤。
+
+模型（LoopDelete 工具）依然无权修改 forever 循环。
+
 ## 其他功能（继承自上游）
 
 - **固定间隔循环** —— `/loop 15m <prompt>`：解析间隔为 cron，由自重装定时器驱动，续跑是默认行为。
@@ -62,9 +84,10 @@ pi install file:/path/to/pi-loop-fork
 自定节奏：模型干完一轮后自行决定是否通过 `schedule_loop_wakeup` 继续，任务完成时不调用即自然结束。
 
 ```
-/loop stop          # 停止所有循环
+/loop stop          # 打开管理面板（同 /loop list）；不会停止任何东西
+/loop stop all      # 停止所有循环
 /loop stop 3        # 停止 3 号循环
-/loop list          # 查看/管理活跃循环
+/loop list          # 打开管理面板
 ```
 
 ## 用法
@@ -77,8 +100,9 @@ pi install file:/path/to/pi-loop-fork
 | `/loop 15m <prompt>` | 固定间隔（cron）循环。间隔也可放句尾：`<prompt> every 2 hours`。 |
 | `/loop 0 9 * * 1-5 <prompt>` | 完整 5 段 cron 表达式。 |
 | `/loop <prompt>` | 自定节奏循环——模型每轮通过 `schedule_loop_wakeup` 续跑，不调用即结束。 |
-| `/loop list` | 查看/管理活跃循环。 |
-| `/loop stop [id]` | 停止所有循环，或按 id 停一个。 |
+| `/loop list` | 打开循环管理面板（编辑/暂停/恢复/停止/全部停止）。 |
+| `/loop stop all` | 停止所有循环。 |
+| `/loop stop [id]` | 直停指定循环。不带参数不停止任何东西。 |
 
 间隔支持 `s` / `m` / `h` / `d`。不足一分钟的向上取整到一分钟（cron 下限）；不整的间隔（如 `7m`）会吸附到最近的整步并告知你实际选了什么。
 

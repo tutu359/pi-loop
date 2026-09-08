@@ -730,6 +730,113 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 		},
 	});
 
+	// ── Manager panel ───────────────────────────────────────────────────
+
+	// One row per loop for the manager list: id, status, trigger, fire count,
+	// next fire (cron) and a prompt preview.
+	function managerLine(l: LoopEntry): string {
+		const next =
+			l.status === "active" &&
+			(l.trigger.type === "cron" || l.trigger.type === "hybrid")
+				? scheduler.nextFire(l.id)
+				: undefined;
+		const when = next ? ` · next ${formatRemaining(next - Date.now())}` : "";
+		const status = l.status === "active" ? "active" : l.status;
+		return `#${l.id} [${status}] ${describeTrigger(l.trigger)} · ${l.fireCount ?? 0}×${when} · ${l.prompt.slice(0, 48)}`;
+	}
+
+	// Inspect and manage every loop from one place: pick a loop to edit,
+	// pause/resume or stop it; or stop everything. The panel closes after one
+	// pick — re-open with /loop list for the next action (no in-process loop,
+	// so a mock or a user can never spin it forever).
+	async function manageLoops(ctx: ExtensionCommandContext): Promise<void> {
+		const loops = store.list();
+		if (loops.length === 0) {
+			notify("All loops removed.");
+			return;
+		}
+		const choice = await ctx.ui.select("Loops — pick one to manage", [
+			...loops.map(managerLine),
+			"⚠️ Stop all",
+			"← Close",
+		]);
+		if (!choice || choice === "← Close") {
+			return;
+		}
+		if (choice === "⚠️ Stop all") {
+			const all = store.list();
+			for (const l of all) stopLoop(l.id, "requested");
+			notify(`Stopped ${all.length} loop${all.length === 1 ? "" : "s"}.`);
+			return;
+		}
+		const id = choice.slice(1).split(/\s/)[0];
+		await manageOne(id, ctx);
+	}
+
+	// Actions for a single loop: edit / pause-resume / stop.
+	async function manageOne(
+		id: string,
+		ctx: ExtensionCommandContext,
+	): Promise<void> {
+		const entry = store.get(id);
+		if (!entry) {
+			notify(`Loop #${id} not found.`, "warning");
+			return;
+		}
+		const actions = [
+			"✏️ Edit prompt",
+			entry.status === "paused" ? "▶️ Resume" : "⏸️ Pause",
+			"🛑 Stop",
+			"← Back",
+		];
+		const action = await ctx.ui.select(
+			`Loop #${id} — ${entry.prompt.slice(0, 60)}`,
+			actions,
+		);
+		if (action === "✏️ Edit prompt") {
+			const updated = await ctx.ui.editor("Prompt:", entry.prompt);
+			const next = typeof updated === "string" ? updated.trim() : "";
+			if (!next) {
+				notify("Edit cancelled (empty prompt).");
+				return;
+			}
+			if (next === entry.prompt) {
+				notify("Prompt unchanged.");
+				return;
+			}
+			store.update(id, { prompt: next });
+			notify(`Loop #${id} prompt updated — takes effect on its next fire.`);
+		} else if (action === "⏸️ Pause") {
+			triggers.remove(id);
+			store.setStatus(id, "paused");
+			renderStatus();
+			notify(`Loop #${id} paused — /loop (manager) to resume.`);
+		} else if (action === "▶️ Resume") {
+			const fresh = store.get(id);
+			if (!fresh) return;
+			store.setStatus(id, "active");
+			triggers.add(fresh);
+			const resumed = store.get(id);
+			if (!resumed) return;
+			if (fresh.trigger.type === "forever") {
+				// Forever loops live on the idle→fire chain, not on a timer: resume
+				// must kick one immediately or it sits silent until the next agent_end.
+				if (latestCtx?.isIdle() && !latestCtx.hasPendingMessages())
+					deliverFire(resumed);
+			} else if (fresh.trigger.type === "self-paced") {
+				// Same silence hazard: pause cancelled nothing but resume arms no
+				// wakeup timer (triggers.add is a no-op for self-paced), and the
+				// model never gets a turn to schedule one. Fire now so it gets a
+				// turn; the model then re-arms the normal way.
+				fireSelfPacedNow(resumed);
+			}
+			renderStatus();
+			notify(`Loop #${id} resumed.`);
+		} else if (action === "🛑 Stop") {
+			stopLoop(id, "requested");
+		}
+	}
+
 	// ── /loop command ─────────────────────────────────────────────────────
 
 	pi.registerCommand("loop", {
@@ -752,49 +859,45 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 
 			// Stop
 			if (first === "stop" || first === "off") {
-				const id = trimmed.split(/\s+/)[1];
-				if (id) {
-					if (!stopLoop(id, "requested"))
-						notify(`Loop #${id} not found.`, "warning");
+				const rest = trimmed.split(/\s+/)[1]?.toLowerCase() ?? "";
+				if (rest === "all") {
+					const all = store.list();
+					if (all.length === 0) {
+						notify("No active loops.");
+						return;
+					}
+					for (const l of all) stopLoop(l.id, "requested");
+					notify(`Stopped ${all.length} loop${all.length === 1 ? "" : "s"}.`);
 					return;
 				}
-				const active = store.listActive();
-				if (active.length === 0) {
-					notify("No active loops.");
+				if (rest) {
+					if (!stopLoop(rest, "requested"))
+						notify(`Loop #${rest} not found.`, "warning");
 					return;
 				}
-				for (const l of active) stopLoop(l.id, "requested");
-				notify(`Stopped ${active.length} loop${active.length === 1 ? "" : "s"}.`);
+				// Bare /loop stop stops nothing — direct the user to the manager.
+				notify(
+					"Nothing stopped. Use /loop (manager), /loop stop <id>, or /loop stop all.",
+				);
 				return;
 			}
 
-			// List / menu
-			if (first === "list" || (!trimmed && store.listActive().length > 0)) {
-				const active = store.listActive();
-				if (active.length === 0) {
-					notify("No active loops.");
+			// Manager panel: the single entry point for inspecting and editing loops.
+			if (first === "list" || !trimmed) {
+				if (store.list().length === 0) {
+					notify(
+						"No loops. Create one: /loop 15m <prompt> or /loop forever <prompt>",
+					);
 					return;
 				}
-				const choice = await ctx.ui.select("Active loops", [
-					...active.map(
-						(l) =>
-							`#${l.id} ${l.prompt.slice(0, 50)} (${describeTrigger(l.trigger)})`,
-					),
-					"Stop all",
-					"← Close",
-				]);
-				if (choice === "Stop all") {
-					for (const l of active) stopLoop(l.id, "requested");
-					notify(`Stopped ${active.length} loops.`);
-				} else if (choice && choice.startsWith("#")) {
-					const id = choice.slice(1).split(/\s/)[0];
-					stopLoop(id, "requested");
-				}
+				await manageLoops(ctx);
 				return;
 			}
 
 			if (!trimmed) {
-				notify("Usage: /loop [interval] <prompt> · /loop stop [id] · /loop list");
+				notify(
+					"Usage: /loop [interval|forever] <prompt> · /loop (manager) · /loop stop [id|all]",
+				);
 				return;
 			}
 
@@ -908,17 +1011,17 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 		deliverDue();
 		continueOrEndSelfPaced();
 		// Classify the finished run for forever loops. Only context overflow gets
-			// special treatment (compact before continuing); every other failure
-			// mode — overload, maintenance, auth, unknown — just retries immediately.
+		// special treatment (compact before continuing); every other failure
+		// mode — overload, maintenance, auth, unknown — just retries immediately.
 		lastRunOverflow =
 			classifyRun((event as { messages?: unknown }).messages) === "overflow";
 	});
 
 	// agent_settled = the session is truly idle (no run, no compaction, no retry,
-		// no queued continuation). agent_end fires while the session still counts
-		// as busy, so forever continuation must happen here — not at agent_end —
-		// or the busy check would skip every fire and the loop would die after one
-		// iteration.
+	// no queued continuation). agent_end fires while the session still counts
+	// as busy, so forever continuation must happen here — not at agent_end —
+	// or the busy check would skip every fire and the loop would die after one
+	// iteration.
 	pi.on("agent_settled", async (_event, ctx) => {
 		captureCtx(ctx);
 		if (lastRunOverflow) {

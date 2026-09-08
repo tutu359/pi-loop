@@ -613,13 +613,14 @@ Prefer LoopCreate over raw Bash sleep/while loops: it survives across turns and 
 			const entry = store.get(params.id);
 			if (!entry)
 				return Promise.resolve(textResult(`Loop #${params.id} not found.`));
-			// Forever loops are user-owned: the model has no authority to delete or
-			// pause them (this is what previously let the model silently replace a
-			// user's loop with its own). Only the user can /loop stop them.
-			if (entry.trigger.type === "forever") {
+			// User-created loops are user-owned: the model has no authority to
+			// delete or pause them (this is what previously let the model silently
+			// replace a user's loop with its own). Only the user can stop them
+			// (via /loop, the manager panel, or /loop stop <id>).
+			if (entry.source === "command") {
 				return Promise.resolve(
 					textResult(
-						`Loop #${params.id} is a forever loop owned by the user — you cannot modify it. Ask the user to run /loop stop ${params.id} if it should end.`,
+						`Loop #${params.id} was created by the user and is user-owned — you cannot modify it. Ask the user to run /loop stop ${params.id} if it should end.`,
 					),
 				);
 			}
@@ -881,7 +882,7 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 			}
 
 			// Manager panel: /loop (bare) or /loop list opens it — bare is the
-				// primary form; "list" stays as an alias for habit and scripts.
+			// primary form; "list" stays as an alias for habit and scripts.
 			if (first === "list" || !trimmed) {
 				if (store.list().length === 0) {
 					notify(
@@ -936,12 +937,17 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 					notify((err as Error).message, "error");
 					return;
 				}
+				// User-created cron loops are also 10-year like forever: only the user
+				// ends them. They're not expired by the 7-day cap.
 				const entry = store.create(
 					{ type: "cron", schedule: parsed.cron },
 					prompt,
 					{ recurring: true, source: "command" },
 				);
-				activateLoop(entry);
+				store.update(entry.id, {
+					expiresAt: Date.now() + 3650 * 24 * 60 * 60 * 1000,
+				});
+				activateLoop(store.get(entry.id) ?? entry);
 				notify(
 					`Loop #${entry.id} started — every ${parsed.description}. /loop stop ${entry.id} to end.`,
 				);

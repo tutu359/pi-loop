@@ -224,23 +224,22 @@ test("user /loop stop ends a loop", async () => {
 	assert.equal(sent.length, 1, "the user (via /loop stop) ends it");
 });
 
-test("model can LoopDelete a user-started /loop (and stop it)", async () => {
-	const { sent, command, ctx, dispatch, callTool } = setup();
+test("model CANNOT LoopDelete a user-started /loop (fork: user-owned)", async () => {
+	const { sent, command, ctx, callTool } = setup();
 	await command.handler("grind", ctx);
 	assert.equal(sent.length, 1);
 
 	const del = await callTool("LoopDelete", { id: "1" });
 	assert.match(
 		del,
-		/deleted/i,
-		"the agent may end a user /loop when it decides to",
+		/created by the user/i,
+		"user-created loops are user-owned; the model is refused",
 	);
 
-	// Deleted loop does not fire again.
-	await callTool("schedule_loop_wakeup", { delaySeconds: 0 });
-	await dispatch("agent_end");
-	await tick();
-	assert.equal(sent.length, 1, "no re-fire after delete");
+	// Refused delete means the loop is untouched (self-paced still waits for
+	// its own wakeup call — nothing fires here; the refusal is the point).
+	const list = await callTool("LoopList", {});
+	assert.match(list, /#1/, "the loop is still alive after the refused delete");
 });
 
 test("model can also delete its own tool-created loop", async () => {

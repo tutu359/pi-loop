@@ -270,7 +270,27 @@ test("model still cannot pause or delete a forever loop", async () => {
 	await command.handler("forever do work", ctx);
 
 	const del = await callTool("LoopDelete", { id: "1" });
-	assert.match(del, /owned by the user/i);
+	assert.match(del, /created by the user/i);
 	const paused = await callTool("LoopDelete", { id: "1", action: "pause" });
-	assert.match(paused, /owned by the user/i);
+	assert.match(paused, /created by the user/i);
+});
+
+// ── user-owned cron loops (guardrail widened to all command-created loops) ──
+
+test("model cannot pause or delete a user-created cron loop either", async () => {
+	const { command, ctx, callTool } = setup();
+	await command.handler("15m poll things", ctx);
+
+	const del = await callTool("LoopDelete", { id: "1" });
+	assert.match(del, /created by the user/i);
+	const paused = await callTool("LoopDelete", { id: "1", action: "pause" });
+	assert.match(paused, /created by the user/i);
+});
+
+test("user-created cron loop gets the 10-year expiry, like forever", async () => {
+	const { command, ctx, callTool } = setup();
+	await command.handler("15m poll things", ctx);
+	const list = await callTool("LoopList", {});
+	assert.match(list, /#1/);
+	assert.doesNotMatch(list, /expired/i);
 });

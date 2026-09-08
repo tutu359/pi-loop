@@ -845,12 +845,9 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 		getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 			if (/\s/.test(prefix)) return null;
 			// The manager panel owns stop (single + all); creation stays on the
-			// command line. Just point at the panel.
-			const items = [
-				{ value: "list", label: "list — open the loop manager" },
-			];
-			const matches = items.filter((i) => i.value.startsWith(prefix));
-			return matches.length ? matches : null;
+			// command line. Bare /loop already opens the panel, so no suggestions
+			// are needed.
+			return null;
 		},
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			bindSession(ctx);
@@ -883,7 +880,8 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 				return;
 			}
 
-			// Manager panel: the single entry point for inspecting and editing loops.
+			// Manager panel: /loop (bare) or /loop list opens it — bare is the
+				// primary form; "list" stays as an alias for habit and scripts.
 			if (first === "list" || !trimmed) {
 				if (store.list().length === 0) {
 					notify(

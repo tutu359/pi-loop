@@ -845,8 +845,8 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 		getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 			if (/\s/.test(prefix)) return null;
 			const items = [
-				{ value: "stop", label: "stop — end loop(s)" },
-				{ value: "list", label: "list — show active loops" },
+				{ value: "list", label: "list — open the loop manager" },
+				{ value: "stop all", label: "stop all — end every loop" },
 			];
 			const matches = items.filter((i) => i.value.startsWith(prefix));
 			return matches.length ? matches : null;

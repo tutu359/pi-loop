@@ -844,9 +844,10 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 			"Run a prompt repeatedly: /loop [interval] <prompt>. E.g. /loop 15m check the deploy. /loop stop to end.",
 		getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 			if (/\s/.test(prefix)) return null;
+			// The manager panel owns stop (single + all); creation stays on the
+			// command line. Just point at the panel.
 			const items = [
 				{ value: "list", label: "list — open the loop manager" },
-				{ value: "stop all", label: "stop all — end every loop" },
 			];
 			const matches = items.filter((i) => i.value.startsWith(prefix));
 			return matches.length ? matches : null;

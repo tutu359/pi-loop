@@ -49,13 +49,13 @@ export interface ParsedInterval {
 
 function describeSeconds(seconds: number): string {
 	const mins = seconds / 60;
-	if (mins < 60) return `${mins} minute${mins !== 1 ? "s" : ""}`;
+	if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"}`;
 	const hrs = mins / 60;
 	if (hrs % 24 === 0) {
 		const days = hrs / 24;
-		return `${days} day${days !== 1 ? "s" : ""}`;
+		return `${days} day${days === 1 ? "" : "s"}`;
 	}
-	return `${hrs} hour${hrs !== 1 ? "s" : ""}`;
+	return `${hrs} hour${hrs === 1 ? "" : "s"}`;
 }
 
 function snapToCommon(seconds: number): ParsedInterval {
@@ -67,7 +67,10 @@ function snapToCommon(seconds: number): ParsedInterval {
 		if (Math.abs(k - seconds) < Math.abs(best - seconds)) best = k;
 	}
 	const exact = best === seconds ? "" : ` (rounded to ${describeSeconds(best)})`;
-	return { cron: COMMON_INTERVALS[best], description: `${describeSeconds(seconds)}${exact}` };
+	return {
+		cron: COMMON_INTERVALS[best],
+		description: `${describeSeconds(seconds)}${exact}`,
+	};
 }
 
 function isFullCron(expr: string): boolean {
@@ -93,7 +96,10 @@ export function parseInterval(input: string): ParsedInterval {
 		const unit = match[2].toLowerCase();
 		const totalSec = value * (UNIT_SECONDS[unit] ?? 60);
 		if (totalSec < 60) {
-			return { cron: "*/1 * * * *", description: `${totalSec} seconds (rounded to 1 minute)` };
+			return {
+				cron: "*/1 * * * *",
+				description: `${totalSec} seconds (rounded to 1 minute)`,
+			};
 		}
 		return snapToCommon(totalSec);
 	}
@@ -108,13 +114,19 @@ export function parseInterval(input: string): ParsedInterval {
  * token ("15m do X") and a trailing clause ("do X every 2 hours"). Returns the
  * matched interval token (or null) and the remaining prompt text.
  */
-export function extractInterval(args: string): { interval: string | null; prompt: string } {
+export function extractInterval(args: string): {
+	interval: string | null;
+	prompt: string;
+} {
 	const trimmed = args.trim();
 
-	// Leading bare token: "15m ...", "30s ...".
+	// Leading bare token, e.g. "15m do X" or "30s do Y".
 	const lead = trimmed.match(/^(\d+)\s*([smhd])\b\s*/i);
 	if (lead) {
-		return { interval: `${lead[1]}${lead[2].toLowerCase()}`, prompt: trimmed.slice(lead[0].length).trim() };
+		return {
+			interval: `${lead[1]}${lead[2].toLowerCase()}`,
+			prompt: trimmed.slice(lead[0].length).trim(),
+		};
 	}
 
 	// Leading full cron: "*/5 * * * * ...".
@@ -126,10 +138,15 @@ export function extractInterval(args: string): { interval: string | null; prompt
 	// Trailing clause: "... every 2 hours", "... every hour", "... every 30m".
 	const trail = trimmed.match(/\bevery\s+(\d+)?\s*([a-z]+)\b\s*$/i);
 	if (trail) {
-		const unit = WORD_UNIT[trail[2].toLowerCase()] ?? (/^[smhd]$/i.test(trail[2]) ? trail[2].toLowerCase() : null);
+		const unit =
+			WORD_UNIT[trail[2].toLowerCase()] ??
+			(/^[smhd]$/i.test(trail[2]) ? trail[2].toLowerCase() : null);
 		if (unit) {
 			const value = trail[1] ? parseInt(trail[1], 10) : 1;
-			return { interval: `${value}${unit}`, prompt: trimmed.slice(0, trail.index).trim() };
+			return {
+				interval: `${value}${unit}`,
+				prompt: trimmed.slice(0, trail.index).trim(),
+			};
 		}
 	}
 
@@ -139,7 +156,8 @@ export function extractInterval(args: string): { interval: string | null; prompt
 /** Compute the next wall-clock time a cron expression fires after `fromDate`. */
 export function cronToNextFire(cronExpr: string, fromDate: Date): Date {
 	const parts = cronExpr.trim().split(/\s+/);
-	if (parts.length !== 5) throw new Error(`Invalid cron expression: ${cronExpr}`);
+	if (parts.length !== 5)
+		throw new Error(`Invalid cron expression: ${cronExpr}`);
 	const [minF, hourF, dayF, monthF, dowF] = parts;
 
 	const now = new Date(fromDate);
@@ -202,13 +220,19 @@ export function cronFieldMatches(field: string, value: number): boolean {
  * seed), so a loop's offset is stable. Capped at a minute so a fire is never
  * noticeably late relative to its schedule.
  */
-export function computeJitter(loopId: string, recurring: boolean, scheduleMinutes: number): number {
+export function computeJitter(
+	loopId: string,
+	recurring: boolean,
+	scheduleMinutes: number,
+): number {
 	let hash = 0;
 	for (let i = 0; i < loopId.length; i++) {
 		hash = (hash << 5) - hash + loopId.charCodeAt(i);
 		hash |= 0;
 	}
 	const normalized = Math.abs(hash % 10000) / 10000;
-	const spreadMs = recurring ? Math.min((scheduleMinutes / 2) * 60 * 1000, 60 * 1000) : 90 * 1000;
+	const spreadMs = recurring
+		? Math.min((scheduleMinutes / 2) * 60 * 1000, 60 * 1000)
+		: 90 * 1000;
 	return Math.floor(normalized * spreadMs);
 }

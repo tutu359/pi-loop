@@ -54,7 +54,9 @@ export class LoopStore {
 	}
 
 	atCapacity(): boolean {
-		return this.data.loops.filter((l) => l.status === "active").length >= MAX_LOOPS;
+		return (
+			this.data.loops.filter((l) => l.status === "active").length >= MAX_LOOPS
+		);
 	}
 
 	create(trigger: Trigger, prompt: string, opts: CreateOptions = {}): LoopEntry {
@@ -113,7 +115,9 @@ export class LoopStore {
 
 	/** Drop loops whose 7-day window has elapsed. Returns the ids removed. */
 	clearExpired(now = Date.now()): string[] {
-		const expired = this.data.loops.filter((l) => now >= l.expiresAt || l.status === "expired").map((l) => l.id);
+		const expired = this.data.loops
+			.filter((l) => now >= l.expiresAt || l.status === "expired")
+			.map((l) => l.id);
 		if (expired.length) {
 			this.data.loops = this.data.loops.filter((l) => !expired.includes(l.id));
 			this.save();

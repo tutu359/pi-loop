@@ -64,8 +64,12 @@ export class CronScheduler {
 
 		const next = cronToNextFire(schedule, new Date());
 		const minuteField = schedule.trim().split(/\s+/)[0];
-		const stepMinutes = minuteField.startsWith("*/") ? parseInt(minuteField.slice(2), 10) || 30 : 30;
-		const fireTime = next.getTime() + computeJitter(`${this.seed}:${entry.id}`, entry.recurring, stepMinutes);
+		const stepMinutes = minuteField.startsWith("*/")
+			? parseInt(minuteField.slice(2), 10) || 30
+			: 30;
+		const fireTime =
+			next.getTime() +
+			computeJitter(`${this.seed}:${entry.id}`, entry.recurring, stepMinutes);
 
 		if (fireTime > entry.expiresAt) {
 			this.store.setStatus(entry.id, "expired");

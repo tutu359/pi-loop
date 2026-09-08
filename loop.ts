@@ -64,8 +64,20 @@ const BRIDGED_EVENTS = [
 const SELF_PACED_HINT =
 	"\n\n[Self-paced loop: do this iteration's work, then call schedule_loop_wakeup ONCE at the end of your turn and stop — the next iteration starts on its own. Omit the call to end the loop, which is how you finish once the task is done.]";
 
+// Forever loops: harness-driven continuation with no fixed cadence. The loop
+// refires the moment the agent goes idle. Context overflow is handled by
+// queueing /compact before continuing (pi's auto-compaction is the first
+// line of defense; this is the fallback). Every other error is met with an
+// immediate retry — nothing stops a forever loop except /loop stop.
+// Mirrors pi's known context-overflow error shapes (packages/ai overflow.ts).
+const OVERFLOW_RE =
+	/context.?length.?exceeded|context.?window|prompt.?is.?too.?long|maximum.?context|input.?length.?exceeds|too.?many.?tokens|reduce.?the.?length/i;
+
 function textResult(message: string): AgentToolResult<unknown> {
-	return { content: [{ type: "text", text: message }], details: undefined } as AgentToolResult<unknown>;
+	return {
+		content: [{ type: "text", text: message }],
+		details: undefined,
+	} as AgentToolResult<unknown>;
 }
 
 function formatRemaining(ms: number): string {
@@ -88,11 +100,18 @@ function describeTrigger(trigger: Trigger): string {
 			return `hybrid: ${trigger.cron} + ${trigger.event.source}`;
 		case "self-paced":
 			return "self-paced";
+		case "forever":
+			return "forever";
 	}
+	return "unknown";
 }
 
 function inferTriggerType(input: string): "cron" | "event" | "hybrid" {
-	if (input.includes("hybrid") || (input.includes("cron") && input.includes("event"))) return "hybrid";
+	if (
+		input.includes("hybrid") ||
+		(input.includes("cron") && input.includes("event"))
+	)
+		return "hybrid";
 	const t = input.trim();
 	if (/^\d+\s*[smhd]$/i.test(t)) return "cron";
 	if (t.split(/\s+/).length === 5 && /^[*\d]/.test(t)) return "cron";
@@ -135,7 +154,8 @@ export default function loopExtension(pi: ExtensionAPI) {
 	const dueLoops = new Set<string>();
 	let ticker: ReturnType<typeof setInterval> | undefined;
 
-	const notify = (msg: string, type: "info" | "warning" | "error" = "info") => latestUI?.notify(msg, type);
+	const notify = (msg: string, type: "info" | "warning" | "error" = "info") =>
+		latestUI?.notify(msg, type);
 
 	// ── Firing ────────────────────────────────────────────────────────────
 
@@ -144,7 +164,8 @@ export default function loopExtension(pi: ExtensionAPI) {
 	function deliverFire(entry: LoopEntry): void {
 		dueLoops.delete(entry.id);
 		if (entry.trigger.type === "self-paced") firedSinceAgentEnd.add(entry.id);
-		const updated = store.update(entry.id, { fireCount: (entry.fireCount ?? 0) + 1 }) ?? entry;
+		const updated =
+			store.update(entry.id, { fireCount: (entry.fireCount ?? 0) + 1 }) ?? entry;
 
 		const payload: LoopFireEvent = {
 			loopId: entry.id,
@@ -178,7 +199,9 @@ export default function loopExtension(pi: ExtensionAPI) {
 			// A tick that lands mid-turn doesn't queue a stale prompt — it marks the
 			// loop due, and the fire is delivered fresh once the agent goes idle.
 			// Further ticks while due collapse into that one pending fire.
-			const busy = latestCtx ? !latestCtx.isIdle() || latestCtx.hasPendingMessages() : false;
+			const busy = latestCtx
+				? !latestCtx.isIdle() || latestCtx.hasPendingMessages()
+				: false;
 			if (busy) {
 				dueLoops.add(entry.id);
 				renderStatus();
@@ -279,7 +302,50 @@ export default function loopExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	// ── Status widget ───────────────────────────────────────────────────────
+	// ── Forever loops ────────────────────────────────────────────────────
+
+	// Classify the just-finished run from its structured stopReason/errorMessage.
+	// Returns "overflow" when the context limit was hit (stopReason "length" or
+	// an overflow-shaped error message); anything else — overload, maintenance,
+	// auth, unknown — is just "error": the loop retries immediately either way.
+	function classifyRun(messages: unknown): "overflow" | "normal" {
+		if (!Array.isArray(messages)) return "normal";
+		for (const m of (
+			messages as Array<{
+				role?: string;
+				stopReason?: string;
+				errorMessage?: string;
+				content?: unknown;
+			}>
+		)
+			.slice(-6)
+			.reverse()) {
+			if (m?.role !== "assistant" && typeof m?.stopReason === "undefined")
+				continue;
+			if (m.stopReason === "length") return "overflow";
+			if (
+				m.stopReason === "error" &&
+				typeof m.errorMessage === "string" &&
+				OVERFLOW_RE.test(m.errorMessage)
+			)
+				return "overflow";
+		}
+		return "normal";
+	}
+
+	// Refire every active forever loop the instant the agent is idle.
+	function continueForever(): void {
+		for (const l of store.listActive()) {
+			if (l.trigger.type !== "forever") continue;
+			const busy = latestCtx
+				? !latestCtx.isIdle() || latestCtx.hasPendingMessages()
+				: true;
+			if (busy) continue;
+			deliverFire(l);
+		}
+	}
+
+	// ── Status widget ────────────────────────────────────────────────────────
 
 	function renderStatus(): void {
 		if (!latestUI) return;
@@ -296,22 +362,31 @@ export default function loopExtension(pi: ExtensionAPI) {
 			const next = scheduler.nextFire(l.id);
 			const wakeup = selfPacedFireTimes.get(l.id);
 			const isSelfPaced = l.trigger.type === "self-paced";
-			const when = isSelfPaced
-				? wakeup
-					? `next in ${formatRemaining(wakeup - Date.now())}`
-					: "running"
-				: dueLoops.has(l.id)
-					? "due — fires when agent is idle"
-					: next
-						? `next ${formatRemaining(next - Date.now())}`
-						: l.trigger.type === "event"
-							? "on event"
-							: "pending";
+			const isForever = l.trigger.type === "forever";
+			const when = isForever
+				? "refires on idle"
+				: isSelfPaced
+					? wakeup
+						? `next in ${formatRemaining(wakeup - Date.now())}`
+						: "running"
+					: dueLoops.has(l.id)
+						? "due — fires when agent is idle"
+						: next
+							? `next ${formatRemaining(next - Date.now())}`
+							: l.trigger.type === "event"
+								? "on event"
+								: "pending";
 			// Self-paced loops lead with the climbing iteration count (#1 → #2 → …) —
 			// the stable loop id lives in /loop list. Other loops lead with their id
 			// plus a fire tally.
 			const lead = isSelfPaced ? `#${l.fireCount ?? 0}` : `#${l.id}`;
-			const fires = isSelfPaced ? "" : l.maxFires ? ` ${l.fireCount ?? 0}/${l.maxFires}` : l.fireCount ? ` ${l.fireCount}×` : "";
+			const fires = isSelfPaced
+				? ""
+				: l.maxFires
+					? ` ${l.fireCount ?? 0}/${l.maxFires}`
+					: l.fireCount
+						? ` ${l.fireCount}×`
+						: "";
 			return `⟳ ${lead} ${l.prompt.slice(0, 48)} — ${describeTrigger(l.trigger)} · ${when}${fires}`;
 		});
 		latestUI.setWidget(STATUS_KEY, lines);
@@ -349,18 +424,32 @@ export default function loopExtension(pi: ExtensionAPI) {
 	function activateLoop(entry: LoopEntry): void {
 		triggers.add(entry);
 		if (entry.trigger.type === "self-paced") fireSelfPacedNow(entry);
+		if (entry.trigger.type === "forever") {
+			// Kick off the first iteration right away; a mid-turn creation queues as
+			// a followUp and runs the moment the current turn ends.
+			deliverFire(entry);
+		}
 		startTicker();
 		renderStatus();
 	}
 
 	function validateTrigger(trigger: Trigger): string | null {
-		if (trigger.type === "cron" && trigger.schedule.trim().split(/\s+/).length !== 5) {
+		if (
+			trigger.type === "cron" &&
+			trigger.schedule.trim().split(/\s+/).length !== 5
+		) {
 			return `Invalid cron schedule "${trigger.schedule}". Expected 5 fields. Use "5m", "1h", or "0 9 * * 1-5".`;
 		}
-		if (trigger.type === "hybrid" && trigger.cron.trim().split(/\s+/).length !== 5) {
+		if (
+			trigger.type === "hybrid" &&
+			trigger.cron.trim().split(/\s+/).length !== 5
+		) {
 			return `Invalid hybrid cron part "${trigger.cron}". Expected 5 fields.`;
 		}
-		if ((trigger.type === "event" && !trigger.source.trim()) || (trigger.type === "hybrid" && !trigger.event.source.trim())) {
+		if (
+			(trigger.type === "event" && !trigger.source.trim()) ||
+			(trigger.type === "hybrid" && !trigger.event.source.trim())
+		) {
 			return "Event source must be non-empty (e.g. tool_execution_end).";
 		}
 		return null;
@@ -386,17 +475,47 @@ Prefer LoopCreate over raw Bash sleep/while loops: it survives across turns and 
 			"Tell the user the loop id so they can stop it with LoopDelete or /loop stop <id>.",
 		],
 		parameters: Type.Object({
-			trigger: Type.String({ description: 'Interval ("5m", "1h", "0 9 * * *"), event source ("tool_execution_end"), or hybrid spec.' }),
+			trigger: Type.String({
+				description:
+					'Interval ("5m", "1h", "0 9 * * *"), event source ("tool_execution_end"), or hybrid spec.',
+			}),
 			prompt: Type.String({ description: "Prompt to run when the loop fires." }),
-			triggerType: Type.Optional(Type.String({ description: "cron | event | hybrid (inferred if omitted)", enum: ["cron", "event", "hybrid"] })),
-			recurring: Type.Optional(Type.Boolean({ description: "Repeat (default true for cron/hybrid, false for event)." })),
-			readOnly: Type.Optional(Type.Boolean({ description: "Restrict the agent to read-only tools on each fire." })),
-			maxFires: Type.Optional(Type.Number({ description: "Auto-stop after N fires." })),
-			debounceMs: Type.Optional(Type.Number({ description: "Debounce for hybrid triggers (default 30000)." })),
-			filter: Type.Optional(Type.String({ description: 'Event filter: JSON match (e.g. {"monitorId":"1"}) or "regex:..."' })),
+			triggerType: Type.Optional(
+				Type.String({
+					description: "cron | event | hybrid (inferred if omitted)",
+					enum: ["cron", "event", "hybrid"],
+				}),
+			),
+			recurring: Type.Optional(
+				Type.Boolean({
+					description: "Repeat (default true for cron/hybrid, false for event).",
+				}),
+			),
+			readOnly: Type.Optional(
+				Type.Boolean({
+					description: "Restrict the agent to read-only tools on each fire.",
+				}),
+			),
+			maxFires: Type.Optional(
+				Type.Number({ description: "Auto-stop after N fires." }),
+			),
+			debounceMs: Type.Optional(
+				Type.Number({
+					description: "Debounce for hybrid triggers (default 30000).",
+				}),
+			),
+			filter: Type.Optional(
+				Type.String({
+					description:
+						'Event filter: JSON match (e.g. {"monitorId":"1"}) or "regex:..."',
+				}),
+			),
 		}),
 		execute: (_id, params) => {
-			if (store.atCapacity()) return Promise.resolve(textResult("Maximum active loops reached (25). Delete some first."));
+			if (store.atCapacity())
+				return Promise.resolve(
+					textResult("Maximum active loops reached (25). Delete some first."),
+				);
 
 			const inferred = params.triggerType ?? inferTriggerType(params.trigger);
 			let trigger: Trigger;
@@ -404,10 +523,15 @@ Prefer LoopCreate over raw Bash sleep/while loops: it survives across turns and 
 				if (inferred === "cron") {
 					trigger = { type: "cron", schedule: parseInterval(params.trigger).cron };
 				} else if (inferred === "event") {
-					trigger = { type: "event", source: params.trigger.trim(), filter: params.filter };
+					trigger = {
+						type: "event",
+						source: params.trigger.trim(),
+						filter: params.filter,
+					};
 				} else {
 					const cronPart = params.trigger.match(/cron:?\s*(\S.*\S|\S)/)?.[1] ?? "5m";
-					const eventPart = params.trigger.match(/event:?\s*(\S+)/)?.[1] ?? "tool_execution_end";
+					const eventPart =
+						params.trigger.match(/event:?\s*(\S+)/)?.[1] ?? "tool_execution_end";
 					trigger = {
 						type: "hybrid",
 						cron: parseInterval(cronPart).cron,
@@ -443,14 +567,20 @@ Prefer LoopCreate over raw Bash sleep/while loops: it survives across turns and 
 	pi.registerTool({
 		name: "LoopList",
 		label: "LoopList",
-		description: "List active scheduled loops with their ids, triggers, fire counts, and next-fire times.",
+		description:
+			"List active scheduled loops with their ids, triggers, fire counts, and next-fire times.",
 		parameters: Type.Object({}),
 		execute: () => {
 			const loops = store.list();
-			if (loops.length === 0) return Promise.resolve(textResult("No loops configured."));
+			if (loops.length === 0)
+				return Promise.resolve(textResult("No loops configured."));
 			const lines = loops.map((l) => {
-				const next = l.trigger.type === "cron" || l.trigger.type === "hybrid" ? scheduler.nextFire(l.id) : undefined;
-				const wakeup = l.trigger.type === "self-paced" ? selfPacedFireTimes.get(l.id) : undefined;
+				const next =
+					l.trigger.type === "cron" || l.trigger.type === "hybrid"
+						? scheduler.nextFire(l.id)
+						: undefined;
+				const wakeup =
+					l.trigger.type === "self-paced" ? selfPacedFireTimes.get(l.id) : undefined;
 				const when = next
 					? ` · next ${formatRemaining(next - Date.now())}`
 					: wakeup
@@ -468,14 +598,31 @@ Prefer LoopCreate over raw Bash sleep/while loops: it survives across turns and 
 	pi.registerTool({
 		name: "LoopDelete",
 		label: "LoopDelete",
-		description: "Stop a loop by id (delete), or pause it to keep it in the list without firing.",
+		description:
+			"Stop a loop by id (delete), or pause it to keep it in the list without firing.",
 		parameters: Type.Object({
 			id: Type.String({ description: "Loop id." }),
-			action: Type.Optional(Type.String({ description: "delete | pause (default delete)", enum: ["delete", "pause"] })),
+			action: Type.Optional(
+				Type.String({
+					description: "delete | pause (default delete)",
+					enum: ["delete", "pause"],
+				}),
+			),
 		}),
 		execute: (_id, params) => {
 			const entry = store.get(params.id);
-			if (!entry) return Promise.resolve(textResult(`Loop #${params.id} not found.`));
+			if (!entry)
+				return Promise.resolve(textResult(`Loop #${params.id} not found.`));
+			// Forever loops are user-owned: the model has no authority to delete or
+			// pause them (this is what previously let the model silently replace a
+			// user's loop with its own). Only the user can /loop stop them.
+			if (entry.trigger.type === "forever") {
+				return Promise.resolve(
+					textResult(
+						`Loop #${params.id} is a forever loop owned by the user — you cannot modify it. Ask the user to run /loop stop ${params.id} if it should end.`,
+					),
+				);
+			}
 			if (params.action === "pause") {
 				triggers.remove(params.id);
 				store.setStatus(params.id, "paused");
@@ -504,20 +651,39 @@ Think about what you're actually waiting for, not just "how long should I sleep.
 ## The reason field
 
 One short sentence on what you chose and why. It's shown back to the user, so make it specific — "incremented the counter to 5" beats "continuing".`,
-		promptSnippet: "Continue a self-paced /loop by scheduling the next iteration (omit to end).",
+		promptSnippet:
+			"Continue a self-paced /loop by scheduling the next iteration (omit to end).",
 		promptGuidelines: [
 			"In a self-paced /loop, call schedule_loop_wakeup once at the end of your turn to run the next iteration; omit it to end the loop.",
 			"Use delaySeconds 0 to continue immediately, or a positive value to wait before the next iteration.",
 		],
 		parameters: Type.Object({
-			reason: Type.Optional(Type.String({ description: "One short, specific sentence on what you chose and why (shown to the user)." })),
-			delaySeconds: Type.Optional(Type.Number({ description: "Gap before the next iteration. 0 (default) = immediately." })),
-			loopId: Type.Optional(Type.String({ description: "Which self-paced loop to continue (defaults to the one that just fired)." })),
+			reason: Type.Optional(
+				Type.String({
+					description:
+						"One short, specific sentence on what you chose and why (shown to the user).",
+				}),
+			),
+			delaySeconds: Type.Optional(
+				Type.Number({
+					description: "Gap before the next iteration. 0 (default) = immediately.",
+				}),
+			),
+			loopId: Type.Optional(
+				Type.String({
+					description:
+						"Which self-paced loop to continue (defaults to the one that just fired).",
+				}),
+			),
 		}),
 		execute: (_id, params) => {
 			const targetId = params.loopId ?? lastSelfPacedId;
 			const entry = targetId ? store.get(targetId) : undefined;
-			if (!entry || entry.trigger.type !== "self-paced" || entry.status !== "active") {
+			if (
+				!entry ||
+				entry.trigger.type !== "self-paced" ||
+				entry.status !== "active"
+			) {
 				return Promise.resolve(textResult("No active self-paced loop; ignoring."));
 			}
 			// One call per turn is all it takes. A weaker model that doesn't end its
@@ -544,7 +710,9 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 				const at = selfPacedFireTimes.get(entry.id);
 				const when = at ? ` in ${formatRemaining(at - Date.now())}` : " shortly";
 				return Promise.resolve(
-					textResult(`Loop #${entry.id} is already waiting for its next iteration${when}; nothing to schedule.`),
+					textResult(
+						`Loop #${entry.id} is already waiting for its next iteration${when}; nothing to schedule.`,
+					),
 				);
 			}
 
@@ -554,14 +722,19 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 			scheduledThisTurn.set(entry.id, delayMs);
 			if (params.reason) notify(`Loop #${entry.id}: ${params.reason}`);
 			const when = delayMs ? ` in ${formatRemaining(delayMs)}` : " immediately";
-			return Promise.resolve(textResult(`Loop #${entry.id} will run its next iteration${when} (after this turn).`));
+			return Promise.resolve(
+				textResult(
+					`Loop #${entry.id} will run its next iteration${when} (after this turn).`,
+				),
+			);
 		},
 	});
 
 	// ── /loop command ─────────────────────────────────────────────────────
 
 	pi.registerCommand("loop", {
-		description: "Run a prompt repeatedly: /loop [interval] <prompt>. E.g. /loop 15m check the deploy. /loop stop to end.",
+		description:
+			"Run a prompt repeatedly: /loop [interval] <prompt>. E.g. /loop 15m check the deploy. /loop stop to end.",
 		getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 			if (/\s/.test(prefix)) return null;
 			const items = [
@@ -581,7 +754,8 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 			if (first === "stop" || first === "off") {
 				const id = trimmed.split(/\s+/)[1];
 				if (id) {
-					if (!stopLoop(id, "requested")) notify(`Loop #${id} not found.`, "warning");
+					if (!stopLoop(id, "requested"))
+						notify(`Loop #${id} not found.`, "warning");
 					return;
 				}
 				const active = store.listActive();
@@ -601,10 +775,14 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 					notify("No active loops.");
 					return;
 				}
-				const choice = await ctx.ui.select(
-					"Active loops",
-					[...active.map((l) => `#${l.id} ${l.prompt.slice(0, 50)} (${describeTrigger(l.trigger)})`), "Stop all", "← Close"],
-				);
+				const choice = await ctx.ui.select("Active loops", [
+					...active.map(
+						(l) =>
+							`#${l.id} ${l.prompt.slice(0, 50)} (${describeTrigger(l.trigger)})`,
+					),
+					"Stop all",
+					"← Close",
+				]);
 				if (choice === "Stop all") {
 					for (const l of active) stopLoop(l.id, "requested");
 					notify(`Stopped ${active.length} loops.`);
@@ -617,6 +795,28 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 
 			if (!trimmed) {
 				notify("Usage: /loop [interval] <prompt> · /loop stop [id] · /loop list");
+				return;
+			}
+
+			const foreverMatch = trimmed.match(/^forever\s+([\s\S]+)$/i);
+			if (foreverMatch) {
+				const foreverPrompt = foreverMatch[1].trim();
+				if (!foreverPrompt) {
+					notify("Provide a prompt: /loop forever check the deploy", "warning");
+					return;
+				}
+				const entry = store.create({ type: "forever" }, foreverPrompt, {
+					recurring: true,
+					source: "command",
+				});
+				// Forever loops don't expire after 7 days — only /loop stop ends them.
+				store.update(entry.id, {
+					expiresAt: Date.now() + 3650 * 24 * 60 * 60 * 1000,
+				});
+				activateLoop(store.get(entry.id) ?? entry);
+				notify(
+					`Forever loop #${entry.id} started — refires on idle and never stops. Only /loop stop ${entry.id} ends it.`,
+				);
 				return;
 			}
 
@@ -634,14 +834,25 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 					notify((err as Error).message, "error");
 					return;
 				}
-				const entry = store.create({ type: "cron", schedule: parsed.cron }, prompt, { recurring: true, source: "command" });
+				const entry = store.create(
+					{ type: "cron", schedule: parsed.cron },
+					prompt,
+					{ recurring: true, source: "command" },
+				);
 				activateLoop(entry);
-				notify(`Loop #${entry.id} started — every ${parsed.description}. /loop stop ${entry.id} to end.`);
+				notify(
+					`Loop #${entry.id} started — every ${parsed.description}. /loop stop ${entry.id} to end.`,
+				);
 				return;
 			}
 
-			const entry = store.create({ type: "self-paced" }, prompt, { recurring: true, source: "command" });
-			notify(`Auto-looping #${entry.id} started — it repeats after each turn on its own. /loop stop ${entry.id} (or the model calling LoopDelete) ends it.`);
+			const entry = store.create({ type: "self-paced" }, prompt, {
+				recurring: true,
+				source: "command",
+			});
+			notify(
+				`Auto-looping #${entry.id} started — it repeats after each turn on its own. /loop stop ${entry.id} (or the model calling LoopDelete) ends it.`,
+			);
 			activateLoop(entry);
 		},
 	});
@@ -687,10 +898,18 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 	pi.on("session_start", async (_event, ctx) => bindSession(ctx));
 	pi.on("before_agent_start", async (_event, ctx) => captureCtx(ctx));
 	pi.on("turn_start", async (_event, ctx) => captureCtx(ctx));
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		captureCtx(ctx);
 		deliverDue();
 		continueOrEndSelfPaced();
+		// Forever loops: only context overflow gets special treatment — queue
+		// /compact before the next fire so the retry starts with a smaller
+		// context. Every other failure mode (overload, maintenance, auth,
+		// unknown) is met with an immediate retry.
+		if (classifyRun((event as { messages?: unknown }).messages) === "overflow") {
+			pi.sendUserMessage("/compact", { deliverAs: "followUp" });
+		}
+		continueForever();
 	});
 
 	// Typing while a self-paced loop is waiting ends it — you took over. Fixed and
@@ -706,7 +925,13 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 
 	// Bridge selected lifecycle events onto the bus for event/hybrid triggers.
 	// Cast past the per-event overloads — we only need a uniform (name, data) shape.
-	const onAny = pi.on.bind(pi) as unknown as (event: string, handler: (data: unknown) => void) => void;
+	// SAFETY: pi.on's typed overloads only accept the known event names; we
+	// deliberately bridge a fixed list of lifecycle names with a uniform
+	// (name, data) shape, which the overloads cannot express.
+	const onAny = pi.on.bind(pi) as unknown as (
+		event: string,
+		handler: (data: unknown) => void,
+	) => void;
 	for (const ev of BRIDGED_EVENTS) {
 		onAny(ev, (data: unknown) => pi.events.emit(ev, data));
 	}

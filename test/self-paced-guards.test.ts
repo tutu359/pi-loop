@@ -39,7 +39,10 @@ function makeEvents() {
 function setup() {
 	const sent: Array<{ msg: string; opts: unknown }> = [];
 	const notes: string[] = [];
-	const lifecycle = new Map<string, Array<(ev: unknown, ctx: unknown) => unknown>>();
+	const lifecycle = new Map<
+		string,
+		Array<(ev: unknown, ctx: unknown) => unknown>
+	>();
 	// biome-ignore lint/suspicious/noExplicitAny: mock shape
 	const tools = new Map<string, any>();
 	// biome-ignore lint/suspicious/noExplicitAny: mock shape
@@ -55,17 +58,28 @@ function setup() {
 			if (!arr) lifecycle.set(event, (arr = []));
 			arr.push(handler);
 		},
-		sendUserMessage(msg: string, opts: unknown) { sent.push({ msg, opts }); },
+		sendUserMessage(msg: string, opts: unknown) {
+			sent.push({ msg, opts });
+		},
 		// biome-ignore lint/suspicious/noExplicitAny: mock shape
-		registerTool(def: any) { tools.set(def.name, def); },
+		registerTool(def: any) {
+			tools.set(def.name, def);
+		},
 		// biome-ignore lint/suspicious/noExplicitAny: mock shape
-		registerCommand(name: string, def: any) { if (name === "loop") command = def; },
+		registerCommand(name: string, def: any) {
+			if (name === "loop") command = def;
+		},
 	};
 	loopExtension(pi);
 
 	// biome-ignore lint/suspicious/noExplicitAny: mock shape
 	const ctx: any = {
-		ui: { notify: (m: string) => notes.push(m), setStatus() {}, setWidget() {}, select: async () => "" },
+		ui: {
+			notify: (m: string) => notes.push(m),
+			setStatus() {},
+			setWidget() {},
+			select: async () => "",
+		},
 		hasUI: true,
 		cwd: "/tmp/pi-loop-test",
 		sessionManager: { getSessionId: () => "test-session" },
@@ -74,12 +88,16 @@ function setup() {
 		isIdle: () => true,
 		hasPendingMessages: () => false,
 		signal: undefined,
-		abort() {}, shutdown() {}, getContextUsage() {}, compact() {},
+		abort() {},
+		shutdown() {},
+		getContextUsage() {},
+		compact() {},
 		getSystemPrompt: () => "",
 	};
 
 	const dispatch = async (event: string, ev?: unknown) => {
-		for (const h of lifecycle.get(event) ?? []) await h(ev ?? { type: event }, ctx);
+		for (const h of lifecycle.get(event) ?? [])
+			await h(ev ?? { type: event }, ctx);
 	};
 	const callTool = async (name: string, params: unknown) => {
 		const res = await tools.get(name).execute("call-id", params);
@@ -107,7 +125,11 @@ test("a loop waiting on a delayed wakeup survives an unrelated agent run", async
 	await tick();
 
 	const list = await callTool("LoopList", {});
-	assert.doesNotMatch(list, /No loops configured/i, "the waiting loop still exists");
+	assert.doesNotMatch(
+		list,
+		/No loops configured/i,
+		"the waiting loop still exists",
+	);
 	assert.match(list, /wakeup in/i, "its wakeup is still armed");
 });
 
@@ -119,10 +141,20 @@ test("two self-paced loops both continue when each is scheduled by id", async ()
 	await command.handler("loop A work", ctx);
 	await command.handler("loop B work", ctx);
 
-	const a = await callTool("schedule_loop_wakeup", { delaySeconds: 0, loopId: "1" });
-	const b = await callTool("schedule_loop_wakeup", { delaySeconds: 0, loopId: "2" });
+	const a = await callTool("schedule_loop_wakeup", {
+		delaySeconds: 0,
+		loopId: "1",
+	});
+	const b = await callTool("schedule_loop_wakeup", {
+		delaySeconds: 0,
+		loopId: "2",
+	});
 	assert.match(a, /next iteration/i, "loop #1 scheduled");
-	assert.match(b, /next iteration/i, "loop #2 scheduled — not rejected as a repeat");
+	assert.match(
+		b,
+		/next iteration/i,
+		"loop #2 scheduled — not rejected as a repeat",
+	);
 
 	await dispatch("agent_end");
 	await tick();
@@ -188,10 +220,16 @@ test("a repeat wakeup call in the same turn tells the model to end its turn", as
 	const { command, ctx, callTool } = setup();
 	await command.handler("poll something", ctx);
 
-	const first = await callTool("schedule_loop_wakeup", { delaySeconds: 0, reason: "continuing" });
+	const first = await callTool("schedule_loop_wakeup", {
+		delaySeconds: 0,
+		reason: "continuing",
+	});
 	assert.match(first, /next iteration/i);
 
-	const second = await callTool("schedule_loop_wakeup", { delaySeconds: 0, reason: "continuing" });
+	const second = await callTool("schedule_loop_wakeup", {
+		delaySeconds: 0,
+		reason: "continuing",
+	});
 	assert.match(second, /already scheduled/i);
 	assert.match(second, /do not call this tool again/i);
 	assert.match(second, /end your turn/i);
@@ -203,11 +241,18 @@ test("repeat wakeup calls do not spam the user with notifications", async () => 
 	notes.length = 0;
 
 	for (let i = 0; i < 5; i++) {
-		await callTool("schedule_loop_wakeup", { delaySeconds: 0, reason: "checking again" });
+		await callTool("schedule_loop_wakeup", {
+			delaySeconds: 0,
+			reason: "checking again",
+		});
 	}
 
 	const reasonNotes = notes.filter((n) => n.includes("checking again"));
-	assert.equal(reasonNotes.length, 1, "only the call that actually scheduled notifies");
+	assert.equal(
+		reasonNotes.length,
+		1,
+		"only the call that actually scheduled notifies",
+	);
 });
 
 test("a repeat call does not change the already-scheduled delay", async () => {
@@ -276,7 +321,19 @@ test("the self-paced hint asks for one call and does not forbid stopping", async
 	const { sent, command, ctx } = setup();
 	await command.handler("count to ten", ctx);
 
-	assert.match(sent[0].msg, /ONCE at the end of your turn/i, "asks for a single call");
-	assert.match(sent[0].msg, /Omit the call to end the loop/i, "omit-to-end is stated");
-	assert.doesNotMatch(sent[0].msg, /will not stop/i, "nothing tells the model it may never stop");
+	assert.match(
+		sent[0].msg,
+		/ONCE at the end of your turn/i,
+		"asks for a single call",
+	);
+	assert.match(
+		sent[0].msg,
+		/Omit the call to end the loop/i,
+		"omit-to-end is stated",
+	);
+	assert.doesNotMatch(
+		sent[0].msg,
+		/will not stop/i,
+		"nothing tells the model it may never stop",
+	);
 });

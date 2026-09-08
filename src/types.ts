@@ -28,7 +28,20 @@ export interface SelfPacedTrigger {
 	type: "self-paced";
 }
 
-export type Trigger = CronTrigger | EventTrigger | HybridTrigger | SelfPacedTrigger;
+/** Harness-driven永续: refires the moment the agent goes idle. Context overflow
+ *  is handled by queueing /compact before continuing; every other error is met
+ *  with an immediate retry. Never stops on its own — only /loop stop ends it.
+ *  The model has no authority to modify or delete it. */
+export interface ForeverTrigger {
+	type: "forever";
+}
+
+export type Trigger =
+	| CronTrigger
+	| EventTrigger
+	| HybridTrigger
+	| SelfPacedTrigger
+	| ForeverTrigger;
 
 /**
  * Where a loop came from. This decides takeover behaviour:

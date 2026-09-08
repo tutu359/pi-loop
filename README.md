@@ -25,6 +25,7 @@ The fire hint also told the model it "will not stop unless specificly indicated 
 Self-paced `/loop <prompt>` is now **model-driven**, faithfully matching Claude Code's `/loop`: the model does one iteration's work, then calls `schedule_loop_wakeup` at the end of its turn to run the next one — and ends the loop simply by **not** calling it (omit-to-end). There is no harness auto-continue.
 
 One mechanism, three natural shapes:
+
 - **Indefinite** — the model calls the wakeup every turn (e.g. *keep incrementing count.txt*).
 - **Goal-bound** — it continues until the goal is met, then omits the call (e.g. *count to 10, then stop*).
 - **Stochastic** — it continues an unpredictable number of times, stopping on a runtime condition (e.g. *roll a die until a 6*).
@@ -61,11 +62,13 @@ Verify it's loaded with `pi list`.
 ```
 /loop 5m check if the deployment finished and report what happened
 ```
+
 Fixed 5-minute loop. Runs until you stop it, 7 days pass, or it hits a fire cap.
 
 ```
 /loop check whether CI passed and address review comments
 ```
+
 Self-paced: the model works an iteration, then continues by calling `schedule_loop_wakeup` — and stops on its own when the task is done (or you `/loop stop` / type to take over).
 
 ```
@@ -79,7 +82,7 @@ Self-paced: the model works an iteration, then continues by calling `schedule_lo
 ### `/loop` command
 
 | Input | Behaviour |
-|---|---|
+| --- | --- |
 | `/loop 15m <prompt>` | Fixed-interval (cron) loop. Interval may also trail: `<prompt> every 2 hours`. |
 | `/loop 0 9 * * 1-5 <prompt>` | Full 5-field cron schedule. |
 | `/loop <prompt>` | Self-paced loop — the model continues each turn via `schedule_loop_wakeup`, and ends it by omitting the call (or you `/loop stop`). |
@@ -91,7 +94,7 @@ Intervals use `s` / `m` / `h` / `d`. Sub-minute rounds up to one minute (cron's 
 ### Tools (for the agent)
 
 | Tool | What it does |
-|---|---|
+| --- | --- |
 | `LoopCreate` | Schedule a loop on a cron timer, a pi event, or a hybrid of both. Supports `recurring`, `readOnly`, `maxFires`, `filter`. |
 | `LoopList` | List loops with ids, triggers, fire counts, next-fire times. |
 | `LoopDelete` | Delete a loop, or `action="pause"` to keep it without firing. |
@@ -128,7 +131,7 @@ npm test            # node:test via tsx — covers parsing, cron, jitter
 Source layout:
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `src/types.ts` | Loop/trigger types. |
 | `src/loop-parse.ts` | `parseInterval`, `extractInterval`, cron math, jitter (pure, tested). |
 | `src/store.ts` | Loop registry + JSON persistence. |

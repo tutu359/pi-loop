@@ -22,7 +22,8 @@ export class TriggerSystem {
 	start(): void {
 		this.scheduler.start();
 		for (const entry of this.store.listActive()) {
-			if (entry.trigger.type === "event" || entry.trigger.type === "hybrid") this.subscribe(entry);
+			if (entry.trigger.type === "event" || entry.trigger.type === "hybrid")
+				this.subscribe(entry);
 		}
 	}
 
@@ -36,8 +37,10 @@ export class TriggerSystem {
 	}
 
 	add(entry: LoopEntry): void {
-		if (entry.trigger.type === "cron" || entry.trigger.type === "hybrid") this.scheduler.add(entry);
-		if (entry.trigger.type === "event" || entry.trigger.type === "hybrid") this.subscribe(entry);
+		if (entry.trigger.type === "cron" || entry.trigger.type === "hybrid")
+			this.scheduler.add(entry);
+		if (entry.trigger.type === "event" || entry.trigger.type === "hybrid")
+			this.subscribe(entry);
 	}
 
 	remove(id: string): void {
@@ -52,8 +55,18 @@ export class TriggerSystem {
 
 	private subscribe(entry: LoopEntry): void {
 		const trig = entry.trigger;
-		const source = trig.type === "hybrid" ? trig.event.source : trig.type === "event" ? trig.source : null;
-		const filter = trig.type === "hybrid" ? trig.event.filter : trig.type === "event" ? trig.filter : undefined;
+		const source =
+			trig.type === "hybrid"
+				? trig.event.source
+				: trig.type === "event"
+					? trig.source
+					: null;
+		const filter =
+			trig.type === "hybrid"
+				? trig.event.filter
+				: trig.type === "event"
+					? trig.filter
+					: undefined;
 		if (!source) return;
 
 		this.unsubs.get(entry.id)?.(); // avoid duplicate subscriptions on re-add
@@ -75,14 +88,18 @@ export class TriggerSystem {
 		this.fire(current);
 		const fresh = this.store.get(entry.id);
 		if (!fresh) return;
-		if (!fresh.recurring || (fresh.maxFires && (fresh.fireCount ?? 0) >= fresh.maxFires)) {
+		if (
+			!fresh.recurring ||
+			(fresh.maxFires && (fresh.fireCount ?? 0) >= fresh.maxFires)
+		) {
 			this.store.setStatus(entry.id, "expired");
 			this.remove(entry.id);
 		}
 	}
 
 	private debouncedFire(entry: LoopEntry): void {
-		const debounceMs = entry.trigger.type === "hybrid" ? entry.trigger.debounceMs : 0;
+		const debounceMs =
+			entry.trigger.type === "hybrid" ? entry.trigger.debounceMs : 0;
 		const last = this.lastFire.get(entry.id) ?? 0;
 		const remaining = debounceMs - (Date.now() - last);
 

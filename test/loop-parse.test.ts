@@ -1,7 +1,13 @@
 // Run with: npm test  (tsx test/loop-parse.test.ts)
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { computeJitter, cronFieldMatches, cronToNextFire, extractInterval, parseInterval } from "../src/loop-parse";
+import {
+	computeJitter,
+	cronFieldMatches,
+	cronToNextFire,
+	extractInterval,
+	parseInterval,
+} from "../src/loop-parse";
 
 test("parseInterval: clean intervals map to cron steps", () => {
 	assert.equal(parseInterval("5m").cron, "*/5 * * * *");
@@ -36,7 +42,10 @@ test("extractInterval: leading bare token", () => {
 		interval: "15m",
 		prompt: "find something broken",
 	});
-	assert.deepEqual(extractInterval("30s ping"), { interval: "30s", prompt: "ping" });
+	assert.deepEqual(extractInterval("30s ping"), {
+		interval: "30s",
+		prompt: "ping",
+	});
 });
 
 test("extractInterval: trailing clause", () => {
@@ -44,14 +53,20 @@ test("extractInterval: trailing clause", () => {
 		interval: "2h",
 		prompt: "check the deploy",
 	});
-	assert.deepEqual(extractInterval("poll ci every hour"), { interval: "1h", prompt: "poll ci" });
+	assert.deepEqual(extractInterval("poll ci every hour"), {
+		interval: "1h",
+		prompt: "poll ci",
+	});
 });
 
 test("extractInterval: no interval → null + full prompt", () => {
-	assert.deepEqual(extractInterval("find something missing or broken and fix it"), {
-		interval: null,
-		prompt: "find something missing or broken and fix it",
-	});
+	assert.deepEqual(
+		extractInterval("find something missing or broken and fix it"),
+		{
+			interval: null,
+			prompt: "find something missing or broken and fix it",
+		},
+	);
 	// "forever" is not an interval — it stays in the prompt, loop is just recurring.
 	assert.equal(extractInterval("forever fix bugs").interval, null);
 });
@@ -94,6 +109,8 @@ test("computeJitter: recurring jitter never exceeds a minute", () => {
 });
 
 test("computeJitter: different seeds give different offsets for the same loop id", () => {
-	const offsets = new Set(["a:1", "b:1", "c:1", "d:1"].map((id) => computeJitter(id, true, 10)));
+	const offsets = new Set(
+		["a:1", "b:1", "c:1", "d:1"].map((id) => computeJitter(id, true, 10)),
+	);
 	assert.ok(offsets.size > 1);
 });

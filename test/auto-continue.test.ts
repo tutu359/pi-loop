@@ -61,9 +61,22 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
 // Build a fresh extension instance with its own in-memory store per test.
 function setup(ctxOverrides: Record<string, unknown> = {}) {
 	const sent: Array<{ msg: string; opts: unknown }> = [];
-	const lifecycle = new Map<string, Array<(ev: unknown, ctx: unknown) => unknown>>();
-	const tools = new Map<string, { execute: (id: string, params: unknown) => Promise<{ content: Array<{ text: string }> }> }>();
-	let command: { handler: (args: string, ctx: unknown) => Promise<void> } | undefined;
+	const lifecycle = new Map<
+		string,
+		Array<(ev: unknown, ctx: unknown) => unknown>
+	>();
+	const tools = new Map<
+		string,
+		{
+			execute: (
+				id: string,
+				params: unknown,
+			) => Promise<{ content: Array<{ text: string }> }>;
+		}
+	>();
+	let command:
+		| { handler: (args: string, ctx: unknown) => Promise<void> }
+		| undefined;
 	const events = makeEvents();
 
 	const pi = {
@@ -76,10 +89,19 @@ function setup(ctxOverrides: Record<string, unknown> = {}) {
 		sendUserMessage(msg: string, opts: unknown) {
 			sent.push({ msg, opts });
 		},
-		registerTool(def: { name: string; execute: (id: string, params: unknown) => Promise<{ content: Array<{ text: string }> }> }) {
+		registerTool(def: {
+			name: string;
+			execute: (
+				id: string,
+				params: unknown,
+			) => Promise<{ content: Array<{ text: string }> }>;
+		}) {
 			tools.set(def.name, def);
 		},
-		registerCommand(name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+		registerCommand(
+			name: string,
+			def: { handler: (args: string, ctx: unknown) => Promise<void> },
+		) {
 			if (name === "loop") command = def;
 		},
 	};
@@ -94,7 +116,8 @@ function setup(ctxOverrides: Record<string, unknown> = {}) {
 		widget.lines = Array.isArray(lines) ? (lines as string[]) : [];
 	};
 	const dispatch = async (event: string, ev?: unknown) => {
-		for (const h of lifecycle.get(event) ?? []) await h(ev ?? { type: event }, ctx);
+		for (const h of lifecycle.get(event) ?? [])
+			await h(ev ?? { type: event }, ctx);
 	};
 	const callTool = async (name: string, params: unknown) => {
 		const t = tools.get(name);
@@ -158,21 +181,35 @@ test("CONTINUES turn after turn when the model calls schedule_loop_wakeup", asyn
 
 test("self-paced widget leads with the climbing iteration count (not the loop id)", async () => {
 	const { command, ctx, dispatch, callTool, widget } = setup();
-	await command.handler("write the next highest number into a count.txt file", ctx);
+	await command.handler(
+		"write the next highest number into a count.txt file",
+		ctx,
+	);
 	assert.match(widget.lines[0], /^⟳ #1 /, "first iteration shows #1");
-	assert.doesNotMatch(widget.lines[0], /auto-continues|\d×/, "no 'auto-continues' / 'N×' noise");
+	assert.doesNotMatch(
+		widget.lines[0],
+		/auto-continues|\d×/,
+		"no 'auto-continues' / 'N×' noise",
+	);
 
 	await callTool("schedule_loop_wakeup", { delaySeconds: 0 });
 	await dispatch("agent_end");
 	await tick();
-	assert.match(widget.lines[0], /^⟳ #2 /, "iteration climbs to #2 on the next run");
+	assert.match(
+		widget.lines[0],
+		/^⟳ #2 /,
+		"iteration climbs to #2 on the next run",
+	);
 });
 
 test("self-paced fire prompt is the model-driven (omit-to-end) hint", async () => {
 	const { sent, command, ctx } = setup();
 	await command.handler("write the next highest number", ctx);
 	assert.match(sent[0].msg, /Self-paced loop/i);
-	assert.match(sent[0].msg, /schedule_loop_wakeup ONCE at the end of your turn/i);
+	assert.match(
+		sent[0].msg,
+		/schedule_loop_wakeup ONCE at the end of your turn/i,
+	);
 	assert.match(sent[0].msg, /Omit the call to end the loop/i);
 });
 
@@ -193,7 +230,11 @@ test("model can LoopDelete a user-started /loop (and stop it)", async () => {
 	assert.equal(sent.length, 1);
 
 	const del = await callTool("LoopDelete", { id: "1" });
-	assert.match(del, /deleted/i, "the agent may end a user /loop when it decides to");
+	assert.match(
+		del,
+		/deleted/i,
+		"the agent may end a user /loop when it decides to",
+	);
 
 	// Deleted loop does not fire again.
 	await callTool("schedule_loop_wakeup", { delaySeconds: 0 });
@@ -204,7 +245,10 @@ test("model can LoopDelete a user-started /loop (and stop it)", async () => {
 
 test("model can also delete its own tool-created loop", async () => {
 	const { callTool } = setup();
-	const created = await callTool("LoopCreate", { trigger: "5m", prompt: "poll something" });
+	const created = await callTool("LoopCreate", {
+		trigger: "5m",
+		prompt: "poll something",
+	});
 	assert.match(created, /Loop #1 created/i);
 	const del = await callTool("LoopDelete", { id: "1" });
 	assert.match(del, /deleted/i);
@@ -229,7 +273,10 @@ test("schedule_loop_wakeup with a delay shows a 'next in' countdown and doesn't 
 	assert.equal(sent.length, 1);
 
 	// Model asks to wait 5 minutes before the next iteration.
-	const res = await callTool("schedule_loop_wakeup", { delaySeconds: 300, reason: "waiting for the build" });
+	const res = await callTool("schedule_loop_wakeup", {
+		delaySeconds: 300,
+		reason: "waiting for the build",
+	});
 	assert.match(res, /next iteration in/i);
 	await dispatch("agent_end");
 	await tick();

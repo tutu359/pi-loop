@@ -53,15 +53,35 @@
 - **只读模式** —— 限制循环只使用只读工具。
 - **实时状态** —— footer 指示器和 widget 列出活跃循环及下次触发倒计时。
 
-## 安装
+## 安装 / 更新
+
+安装（或更新到最新版——重复执行同一条命令即可覆盖更新）：
 
 ```bash
-pi install git:github.com/tutu359/pi-loop@main
-# 本地开发调试（改动即时生效）：
+pi install git:github.com:tutu359/pi-loop@main
+```
+
+卸载：
+
+```bash
+pi uninstall git:github.com/tutu359/pi-loop
+```
+
+验证已安装的版本（对照本仓库的 commit hash）：
+
+```bash
+cd ~/.pi/agent/git/github.com/tutu359/pi-loop && git log --oneline -1
+```
+
+安装 / 更新后需**重启 pi 会话**（或新开会话）让新代码生效。
+
+本地开发调试（改动即时生效，无需 push）：
+
+```bash
 pi install file:/path/to/pi-loop-fork
 ```
 
-用 `pi list` 验证已加载。
+> 注意：`file:` 安装和 `git:` 安装二选一，重复安装会互相覆盖。
 
 ## 快速上手
 

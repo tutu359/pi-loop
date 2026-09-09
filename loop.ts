@@ -70,8 +70,6 @@ const SELF_PACED_HINT =
 // line of defense; this is the fallback). Every other error is met with an
 // immediate retry — nothing stops a forever loop except /loop stop.
 // Mirrors pi's known context-overflow error shapes (packages/ai overflow.ts).
-const OVERFLOW_RE =
-	/context.?length.?exceeded|context.?window|prompt.?is.?too.?long|maximum.?context|input.?length.?exceeds|too.?many.?tokens|reduce.?the.?length/i;
 
 function textResult(message: string): AgentToolResult<unknown> {
 	return {
@@ -304,34 +302,6 @@ export default function loopExtension(pi: ExtensionAPI) {
 
 	// ── Forever loops ────────────────────────────────────────────────────
 
-	// Classify the just-finished run from its structured stopReason/errorMessage.
-	// Returns "overflow" when the context limit was hit (stopReason "length" or
-	// an overflow-shaped error message); anything else — overload, maintenance,
-	// auth, unknown — is just "error": the loop retries immediately either way.
-	function classifyRun(messages: unknown): "overflow" | "normal" {
-		if (!Array.isArray(messages)) return "normal";
-		for (const m of (
-			messages as Array<{
-				role?: string;
-				stopReason?: string;
-				errorMessage?: string;
-				content?: unknown;
-			}>
-		)
-			.slice(-6)
-			.reverse()) {
-			if (m?.role !== "assistant" && typeof m?.stopReason === "undefined")
-				continue;
-			if (m.stopReason === "length") return "overflow";
-			if (
-				m.stopReason === "error" &&
-				typeof m.errorMessage === "string" &&
-				OVERFLOW_RE.test(m.errorMessage)
-			)
-				return "overflow";
-		}
-		return "normal";
-	}
 
 	// Refire every active forever loop the instant the agent is idle.
 	function continueForever(): void {
@@ -1006,20 +976,10 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 	pi.on("session_start", async (_event, ctx) => bindSession(ctx));
 	pi.on("before_agent_start", async (_event, ctx) => captureCtx(ctx));
 	pi.on("turn_start", async (_event, ctx) => captureCtx(ctx));
-	// Context-overflow recovery: whether the run that just ended hit the context
-	// limit. Detected at agent_end (where event.messages are available); acted on
-	// at agent_settled (where the session is truly idle and ctx.compact is safe).
-	let lastRunOverflow = false;
-
-	pi.on("agent_end", async (event, ctx) => {
+	pi.on("agent_end", async (_event, ctx) => {
 		captureCtx(ctx);
 		deliverDue();
 		continueOrEndSelfPaced();
-		// Classify the finished run for forever loops. Only context overflow gets
-		// special treatment (compact before continuing); every other failure
-		// mode — overload, maintenance, auth, unknown — just retries immediately.
-		lastRunOverflow =
-			classifyRun((event as { messages?: unknown }).messages) === "overflow";
 	});
 
 	// agent_settled = the session is truly idle (no run, no compaction, no retry,
@@ -1027,17 +987,23 @@ One short sentence on what you chose and why. It's shown back to the user, so ma
 	// as busy, so forever continuation must happen here — not at agent_end —
 	// or the busy check would skip every fire and the loop would die after one
 	// iteration.
+	//
+	// The loop deliberately does NOT classify errors (overflow, overload, auth —
+	// none of its business). Whatever the failure, it retries when idle.
+	// Compaction is likewise somebody else's job (built-in compaction or an
+	// auto-compact extension); the one thing this loop must handle is the
+	// moment compaction finishes: agent_settled already fired during the
+	// compaction window and was skipped as busy, so re-check on completion —
+	// otherwise a forever loop sleeps forever after one compaction.
 	pi.on("agent_settled", async (_event, ctx) => {
 		captureCtx(ctx);
-		if (lastRunOverflow) {
-			lastRunOverflow = false;
-			// Compact first (fire-and-forget), then refire — the next iteration
-			// starts on a smaller context once compaction finishes.
-			latestCtx?.compact?.({
-				onError: (error: Error) =>
-					notify(`Compaction failed: ${error.message}`, "error"),
-			});
-		}
+		continueForever();
+	});
+
+	pi.on("session_compact", async (_event, ctx) => {
+		captureCtx(ctx);
+		// Compaction rewrote the context and closed its window; whatever paused
+		// the loop's chain, this is a fresh idle moment — try again.
 		continueForever();
 	});
 
